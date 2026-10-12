@@ -1,0 +1,136 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-10-12 00:00:00.000000",
+ "description": "The platform-wide announcement banner the BRCHMS app shows on every page: maintenance windows, upgrades, and anything else every user must see. One record per notice; several may be scheduled, and the app is served the single most recent one whose window is open.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "field_order": [
+  "title",
+  "message",
+  "column_break_state",
+  "severity",
+  "is_active",
+  "dismissible",
+  "section_break_window",
+  "starts_at",
+  "ends_at"
+ ],
+ "fields": [
+  {
+   "description": "Short heading. Shown before the message and truncated to one line by the app.",
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title",
+   "length": 200
+  },
+  {
+   "description": "The notice itself. Plain text or simple HTML; the app sanitises it before rendering.",
+   "fieldname": "message",
+   "fieldtype": "Text Editor",
+   "in_list_view": 1,
+   "label": "Message"
+  },
+  {
+   "fieldname": "column_break_state",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "info",
+   "description": "How alarming this is. info: a neutral notice. warning: something may be affected. critical: an outage or a risk to data.",
+   "fieldname": "severity",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Severity",
+   "options": "info\nwarning\ncritical",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "description": "The master switch. An inactive banner is never served, whatever its window says -- so a notice can be written, scheduled and reviewed without appearing.",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Is Active"
+  },
+  {
+   "default": "1",
+   "description": "Whether the app offers a dismiss control. A dismissed banner reappears when its content changes, so an urgent notice cannot be permanently hidden.",
+   "fieldname": "dismissible",
+   "fieldtype": "Check",
+   "label": "Dismissible"
+  },
+  {
+   "fieldname": "section_break_window",
+   "fieldtype": "Section Break",
+   "label": "Visibility window"
+  },
+  {
+   "description": "When the banner becomes visible. Leave empty to show it as soon as it is active.",
+   "fieldname": "starts_at",
+   "fieldtype": "Datetime",
+   "label": "Starts At"
+  },
+  {
+   "description": "When it stops being visible. Leave empty to show it until it is switched off or replaced. Must be after the start.",
+   "fieldname": "ends_at",
+   "fieldtype": "Datetime",
+   "label": "Ends At"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Banner",
+ "name": "BRCHMS Platform Banner",
+ "naming_rule": "Expression (old style)",
+ "autoname": "format:BRCHMS-BANNER-{#####}",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "BRCHMS Banner Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 0,
+   "print": 0,
+   "read": 1,
+   "report": 0,
+   "role": "BRCHMS Integration",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

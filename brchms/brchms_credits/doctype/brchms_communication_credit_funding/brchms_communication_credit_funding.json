@@ -1,0 +1,196 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-10-12 00:00:00.000000",
+ "description": "One confirmed funding event: what BRCHMS has been told has been paid for. The app's credit ledger imports from these records, so a row here is the authority for units the app will let a church spend.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "field_order": [
+  "event_id",
+  "instance_id",
+  "purchase_reference",
+  "column_break_scope",
+  "organization_id",
+  "funding_group_id",
+  "channel",
+  "section_break_money",
+  "units",
+  "amount_minor",
+  "currency",
+  "unit_price_micros",
+  "column_break_link",
+  "erpnext_payment_document",
+  "section_break_audit",
+  "confirmed_at",
+  "notes"
+ ],
+ "fields": [
+  {
+   "description": "The idempotency key BRCHMS supplies. UNIQUE, and that is the whole reason a redelivered confirmation is safe: the app retries when a response is lost, and a second request under the same key must return this record rather than create another.",
+   "fieldname": "event_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Event ID",
+   "reqd": 1,
+   "unique": 1,
+   "length": 255
+  },
+  {
+   "description": "The ERPNext site this event belongs to. BRCHMS sends its configured ERPNEXT_INSTANCE_ID and refuses an event that names a different one, because the organization and group ids it uses are per-instance.",
+   "fieldname": "instance_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Instance ID",
+   "reqd": 1,
+   "length": 140
+  },
+  {
+   "description": "The payer's invoice or receipt number, as recorded in BRCHMS.",
+   "fieldname": "purchase_reference",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Purchase Reference",
+   "length": 140
+  },
+  {
+   "fieldname": "column_break_scope",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "BRCHMS organization id. A plain string, deliberately: the app's organization model is its own, and mirroring it as a Customer or a custom DocType is a decision the customers-and-pricing workstream has not taken.",
+   "fieldname": "organization_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Organization ID",
+   "length": 140
+  },
+  {
+   "description": "BRCHMS funding-group id: the group that paid and whose balance the units land in.",
+   "fieldname": "funding_group_id",
+   "fieldtype": "Data",
+   "label": "Funding Group ID",
+   "length": 140
+  },
+  {
+   "description": "SMS and email credit are separate balances and are never interchangeable.",
+   "fieldname": "channel",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Channel",
+   "options": "sms\nemail",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_money",
+   "fieldtype": "Section Break",
+   "label": "Money"
+  },
+  {
+   "description": "Service units granted: SMS segments or email messages. An integer, never a float — the app's ledger is exact and a fractional unit has no meaning.",
+   "fieldname": "units",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Units",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "description": "Money paid, in the currency's MINOR units (cents, pesewas). Integer only: 11250 means 112.50. A float here would round somebody's payment.",
+   "fieldname": "amount_minor",
+   "fieldtype": "Int",
+   "label": "Amount (minor units)",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency"
+  },
+  {
+   "description": "Price per unit in MILLIONTHS of a major unit, so 0.045 is 45000 exactly. The app's rate card uses the same scale.",
+   "fieldname": "unit_price_micros",
+   "fieldtype": "Int",
+   "label": "Unit Price (micros)",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "column_break_link",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Optional. When the funding corresponds to a real ERPNext payment, link it here: it makes the funding record auditable against the books instead of a standalone claim.",
+   "fieldname": "erpnext_payment_document",
+   "fieldtype": "Dynamic Link",
+   "label": "ERPNext Payment Document",
+   "options": "erpnext_payment_doctype"
+  },
+  {
+   "fieldname": "erpnext_payment_doctype",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "label": "Payment Document Type",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "section_break_audit",
+   "fieldtype": "Section Break",
+   "label": "Audit"
+  },
+  {
+   "description": "When the authority recorded this confirmation. Set by the API on insert and never edited afterwards.",
+   "fieldname": "confirmed_at",
+   "fieldtype": "Datetime",
+   "label": "Confirmed At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-12 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Credits",
+ "name": "BRCHMS Communication Credit Funding",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "BRCHMS Integration",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
