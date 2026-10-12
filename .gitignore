@@ -1,0 +1,28 @@
+# Python bytecode. `bench` runs this app from a bench checkout, so `.pyc` files
+# appear next to the source as soon as anything imports it; they are build output
+# and must never be committed.
+*.py[cod]
+__pycache__/
+
+# Packaging output. `bench get-app` installs the app into the bench's virtualenv,
+# which leaves an egg-info directory beside `pyproject.toml`.
+*.egg-info/
+build/
+dist/
+
+# Local virtualenvs, for running the tests outside a bench.
+.venv/
+venv/
+
+# Editors and OS noise.
+.vscode/
+.idea/
+.DS_Store
+*~
+
+# Anything holding credentials. The app holds none — the integration key lives in
+# the BRCHMS backend's environment — but a stray `.env` here must never be
+# pushed to a public remote.
+.env
+.env.*
+!.env.example
