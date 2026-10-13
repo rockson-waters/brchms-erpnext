@@ -27,6 +27,64 @@ from brchms.brchms_banner import api
 DOCTYPE = "Rest Platform Banner"
 
 
+def created_between(low, high):
+	"""
+	The banner names in the naming series numbered after `low` and up to `high`.
+
+	Cleanup used to delete by `title LIKE 'Test%'`, which MISSES the tests that
+	create a banner with an EMPTY title on purpose -- they are testing that a
+	title-less notice is refused or hidden. Ten such rows had accumulated on the
+	live site, inactive, one per suite run.
+
+	The naming series is the reliable key: every banner gets `REST-BANNER-#####`
+	regardless of what its title says. A watermark either side of the test run
+	therefore identifies exactly the rows that run created, and -- unlike a title
+	pattern -- can never match an operator's real notice.
+	"""
+	rows = frappe.get_all(
+		DOCTYPE,
+		filters={"name": ("like", "REST-BANNER-%")},
+		fields=["name"],
+		limit_page_length=0,
+	)
+	out = []
+	for row in rows:
+		try:
+			number = int(str(row.name).rsplit("-", 1)[-1])
+		except (TypeError, ValueError):
+			continue
+		if low < number <= high:
+			out.append(row.name)
+	return out
+
+
+def series_watermark():
+	"""The highest number currently used in the banner naming series."""
+	rows = frappe.get_all(
+		DOCTYPE,
+		filters={"name": ("like", "REST-BANNER-%")},
+		fields=["name"],
+		limit_page_length=0,
+	)
+	highest = 0
+	for row in rows:
+		try:
+			highest = max(highest, int(str(row.name).rsplit("-", 1)[-1]))
+		except (TypeError, ValueError):
+			continue
+	return highest
+
+
+def delete_test_banners(low, high):
+	"""Delete exactly what the run created, and report it if anything survived."""
+	names = created_between(low, high)
+	for name in names:
+		frappe.db.delete(DOCTYPE, {"name": name})
+	if names:
+		frappe.db.commit()
+	return names
+
+
 def make_banner(**overrides):
 	values = {
 		"doctype": DOCTYPE,
@@ -79,14 +137,16 @@ def restore_active_banners(names):
 class TestGetActiveBanner(FrappeTestCase):
 	def setUp(self):
 		super().setUp()
-		frappe.db.delete(DOCTYPE, {"title": ("like", "Test%")})
-		frappe.db.commit()
-		# Own the state these tests depend on; see `suspend_active_banners`.
+		# The naming-series watermark, so tearDown can identify exactly the rows
+		# this run created -- including the ones with an EMPTY title that a
+		# `title LIKE 'Test%'` filter silently missed (see `created_between`).
+		self.series_before = series_watermark()
+		# Own the active state these tests depend on; a real notice being live
+		# must not change what these tests assert.
 		self.suspended = suspend_active_banners()
 
 	def tearDown(self):
-		frappe.db.delete(DOCTYPE, {"title": ("like", "Test%")})
-		frappe.db.commit()
+		delete_test_banners(self.series_before, series_watermark())
 		restore_active_banners(self.suspended)
 		super().tearDown()
 
@@ -180,12 +240,13 @@ class TestGetActiveBanner(FrappeTestCase):
 class TestBannerValidation(FrappeTestCase):
 	def setUp(self):
 		super().setUp()
-		frappe.db.delete(DOCTYPE, {"title": ("like", "Test%")})
-		frappe.db.commit()
+		# This class creates a banner with an EMPTY title on purpose, which is
+		# exactly what a `title LIKE 'Test%'` cleanup cannot see -- ten such rows
+		# had accumulated on the live site before this was noticed.
+		self.series_before = series_watermark()
 
 	def tearDown(self):
-		frappe.db.delete(DOCTYPE, {"title": ("like", "Test%")})
-		frappe.db.commit()
+		delete_test_banners(self.series_before, series_watermark())
 		super().tearDown()
 
 	def test_refuses_an_active_banner_with_no_text(self):
