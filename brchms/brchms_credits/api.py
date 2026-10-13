@@ -130,9 +130,28 @@ def _insert_funding(payload):
 
 	So the loser re-reads and returns the winner. The unique index remains the
 	authority; this only stops it surfacing as a failure.
+
+	## Permissions, and why the insert ignores them
+
+	The integration user has **read-only** access to this doctype, deliberately:
+	the `BRCHMS Integration` role carries `read: 1` and `create: 0`, so a leaked
+	key cannot add, change or delete rows. Only this method may write one.
+
+	That is why the insert sets `ignore_permissions=True`. Without it Frappe
+	refuses with:
+
+	    PermissionError: User integration@breamal.com does not have doctype access
+	    via role permission for document BRCHMS Communication Credit Funding
+
+	— measured against the live site, on the first end-to-end call. The
+	whitelisted method IS the authorisation boundary, and the roles stay read-only,
+	so this widens nothing. It is the opposite choice from granting `create: 1` to
+	a credential that lives in a `.env` file on a different host.
 	"""
+	# The whitelisted method is the authorisation boundary; see the module
+	# docstring. The integration role stays read-only on the doctype itself.
 	doc = frappe.get_doc({"doctype": DOCTYPE, **payload})
-	doc.flags.ignore_permissions = False
+	doc.flags.ignore_permissions = True
 
 	try:
 		doc.insert()

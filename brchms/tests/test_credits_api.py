@@ -362,3 +362,41 @@ class TestGetFunding(FrappeTestCase):
 			1,
 			"the count after a replay is the assertion the app's safety rests on",
 		)
+
+
+class TestIntegrationRolePermissions(FrappeTestCase):
+	"""
+	The integration role must stay READ-ONLY on the doctype, and the method must
+	still be able to write.
+
+	Both halves matter and they pull in opposite directions. Granting the role
+	`create` would make the first half pass trivially — and would give a credential
+	that lives in a `.env` file on another host the ability to add, change and
+	delete funding rows. So the method inserts with `ignore_permissions=True` and
+	the role keeps `create: 0`. These tests pin BOTH sides, because a future
+	"fix" that grants `create: 1` would silently undo the least-privilege
+	decision while making every other test pass.
+	"""
+
+	def test_the_integration_role_cannot_create_on_the_doctype(self):
+		role = frappe.get_doc("Role", "BRCHMS Integration")
+		perm = next(
+			(p for p in frappe.get_doc("DocType", DOCTYPE).permissions if p.role == role.name),
+			None,
+		)
+		self.assertIsNotNone(perm, "the role has no permission row on the funding doctype")
+		self.assertEqual(perm.read, 1, "the integration user must be able to read funding")
+		self.assertEqual(perm.create, 0, "the integration role must NOT be able to create")
+		self.assertEqual(perm.write, 0, "the integration role must NOT be able to update")
+		self.assertEqual(perm.delete, 0, "the integration role must NOT be able to delete")
+
+	def test_the_method_writes_anyway_because_it_is_the_authorisation_boundary(self):
+		"""
+		The counterpart: with `create: 0`, a naive `doc.insert()` is refused with
+		`PermissionError: ... does not have doctype access via role permission`.
+		Measured on the live site. `ignore_permissions=True` is what lets the
+		whitelisted method write while the role stays read-only.
+		"""
+		response = confirm(**funding_payload(event_id="test:frontend:perm-1"))
+		self.assertEqual(response["event_id"], "test:frontend:perm-1")
+		self.assertEqual(call(api.count_funding, event_id="test:frontend:perm-1"), 1)
