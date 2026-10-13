@@ -1,0 +1,263 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "format:PROP-{#####}",
+ "creation": "2026-10-13 00:00:00.000000",
+ "description": "A request to buy service credits, raised by a Rest deployment. DRAFT means requested and unpaid; SUBMITTED means money has been received and the credits are claimable by the app. The draft-to-submitted step is the whole point: only a person, or a payment gateway's own script, can submit, so nothing a tenant application says can make credits real on its own. Reports filtering on docstatus will not count drafts as revenue, which a status field on a single doctype cannot guarantee.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "is_submittable": 1,
+ "field_order": [
+  "purchase_reference",
+  "instance_id",
+  "column_break_scope",
+  "organization_id",
+  "organization_name",
+  "funding_group_id",
+  "group_name",
+  "section_break_request",
+  "channel",
+  "units",
+  "column_break_money",
+  "amount_minor",
+  "currency",
+  "unit_price_micros",
+  "section_break_settlement",
+  "payment_doctype",
+  "payment_document",
+  "payment_link",
+  "column_break_audit",
+  "confirmed_at",
+  "expires_at",
+  "settled_by",
+  "settlement_note",
+  "quote_variance_minor",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "purchase_reference",
+   "fieldtype": "Data",
+   "label": "Purchase Reference",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "length": 140,
+   "description": "The reference the customer quotes when they pay, and how the operator FINDS this proposal. Required: a purchase that cannot be referenced cannot be matched to a payment, so the proposal would be unmatchable rather than merely hard to find.",
+   "search_index": 1
+  },
+  {
+   "fieldname": "instance_id",
+   "fieldtype": "Link",
+   "label": "Rest Instance",
+   "options": "Rest Instance",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "The Rest deployment that asked. A Link, so the identifier resolves to a record carrying the deployment's name and activity.",
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_scope",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "organization_id",
+   "fieldtype": "Data",
+   "label": "Organization Id",
+   "reqd": 1,
+   "length": 140
+  },
+  {
+   "fieldname": "organization_name",
+   "fieldtype": "Data",
+   "label": "Organization",
+   "in_list_view": 1,
+   "length": 200
+  },
+  {
+   "fieldname": "funding_group_id",
+   "fieldtype": "Data",
+   "label": "Funding Group Id",
+   "reqd": 1,
+   "length": 140
+  },
+  {
+   "fieldname": "group_name",
+   "fieldtype": "Data",
+   "label": "Funding Group",
+   "in_list_view": 1,
+   "length": 200
+  },
+  {
+   "fieldname": "section_break_request",
+   "fieldtype": "Section Break",
+   "label": "What Is Being Bought"
+  },
+  {
+   "fieldname": "channel",
+   "fieldtype": "Select",
+   "label": "Channel",
+   "options": "sms\nemail",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "SMS and email credit are separate balances and are never interchangeable."
+  },
+  {
+   "fieldname": "units",
+   "fieldtype": "Long Int",
+   "label": "Units",
+   "reqd": 1,
+   "in_list_view": 1,
+   "non_negative": 1,
+   "description": "Service units requested: SMS segments or email messages. An integer, never a float."
+  },
+  {
+   "fieldname": "column_break_money",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "amount_minor",
+   "fieldtype": "Long Int",
+   "label": "Amount (minor units)",
+   "reqd": 1,
+   "in_list_view": 1,
+   "non_negative": 1,
+   "description": "What the deployment quoted, in the currency's MINOR units. A settler may correct it: a payment that arrives for a different amount is a fact about money that moved, and refusing it would strand a real payment. The settled amount wins and the difference is recorded."
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency",
+   "reqd": 1
+  },
+  {
+   "fieldname": "unit_price_micros",
+   "fieldtype": "Long Int",
+   "label": "Unit Price (micros)",
+   "non_negative": 1,
+   "description": "The price this purchase was quoted at, in millionths of a major unit. Pricing is pinned when the app raises the request and never re-priced."
+  },
+  {
+   "fieldname": "section_break_settlement",
+   "fieldtype": "Section Break",
+   "label": "Settlement",
+   "depends_on": "docstatus==1",
+   "description": "Filled in when the money has been received. This is the part the Rest app can never do for itself."
+  },
+  {
+   "fieldname": "payment_doctype",
+   "fieldtype": "Link",
+   "label": "Payment Document Type",
+   "options": "DocType",
+   "depends_on": "docstatus==1",
+   "description": "Pick the doctype first (Payment Entry, Sales Invoice, Journal Entry...), then the document. A Dynamic Link needs both halves, which is why it is visible."
+  },
+  {
+   "fieldname": "payment_document",
+   "fieldtype": "Dynamic Link",
+   "label": "Payment Document",
+   "options": "payment_doctype",
+   "depends_on": "docstatus==1",
+   "description": "The payment this settlement is for. This field turns 'money was received' from a claim into something the books already agree with -- before it existed, nothing anywhere checked that a payment had happened at all."
+  },
+  {
+   "fieldname": "payment_link",
+   "fieldtype": "HTML",
+   "label": "Payment Link",
+   "read_only": 1,
+   "depends_on": "docstatus==1"
+  },
+  {
+   "fieldname": "column_break_audit",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "confirmed_at",
+   "fieldtype": "Datetime",
+   "label": "Settled At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "expires_at",
+   "fieldtype": "Datetime",
+   "label": "Expires At",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "When an unpaid proposal stops being claimable. Set by the deployment and stored here, so both sides agree on the deadline."
+  },
+  {
+   "fieldname": "settled_by",
+   "fieldtype": "Link",
+   "label": "Settled By",
+   "options": "User",
+   "read_only": 1,
+   "description": "Who submitted this settlement. On a gateway path this is a script's user rather than a person; either way it is recorded, because 'who made this claimable' must always be answerable."
+  },
+  {
+   "fieldname": "settlement_note",
+   "fieldtype": "Small Text",
+   "label": "Settlement Note",
+   "description": "Anything the settler must record: a cash receipt number, a gateway reference, or why an EXPIRED proposal was settled late."
+  },
+  {
+   "fieldname": "quote_variance_minor",
+   "fieldtype": "Long Int",
+   "label": "Quote Variance (minor)",
+   "read_only": 1,
+   "description": "Settled amount minus quoted amount. Non-zero means the money that arrived differs from the quote, which is recorded rather than hidden."
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Credits",
+ "name": "Rest Credit Proposal",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "cancel": 1,
+   "amend": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Rest Integration",
+   "share": 0,
+   "submit": 0,
+   "cancel": 0,
+   "amend": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

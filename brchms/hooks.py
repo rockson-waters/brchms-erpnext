@@ -48,6 +48,9 @@ form_render = {
     "Rest Communication Credit Funding": {
         "payment_link": "brchms.brchms_credits.form_render.render_funding_extras",
     },
+    "Rest Credit Proposal": {
+        "payment_link": "brchms.brchms_credits.form_render.render_proposal_extras",
+    },
 }
 
 # The same renderer on print, so a printed funding record carries its payment
@@ -55,6 +58,9 @@ form_render = {
 doc_events = {
     "Rest Communication Credit Funding": {
         "before_print": "brchms.brchms_credits.form_render.render_funding_extras",
+    },
+    "Rest Credit Proposal": {
+        "before_print": "brchms.brchms_credits.form_render.render_proposal_extras",
     },
 }
 
