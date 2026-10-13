@@ -40,7 +40,14 @@ def declared_version():
     return match.group(1) if match else None
 
 
-MANIFEST = APP_ROOT / ".brchms-build-manifest.json"
+# The Containerfile stamps this beside the app CHECKOUTS (`apps/`), not inside the
+# checkout (`apps/brchms/`), so APP_ROOT is the wrong place to look. Both are tried
+# rather than one guessed: the first version of this only looked at APP_ROOT, found
+# nothing, and skipped -- a guard that skips looks identical to a guard that passes.
+MANIFEST_CANDIDATES = [
+    APP_ROOT / ".brchms-build-manifest.json",
+    APP_ROOT.parent / ".brchms-build-manifest.json",
+]
 
 
 def requested_pin():
@@ -54,14 +61,17 @@ def requested_pin():
     Containerfile now stamps `apps.json`'s entry for this app into the image, so
     the deployed app can be asked what it was supposed to be.
     """
-    if not MANIFEST.exists():
-        return None
-    try:
-        entry = json.loads(MANIFEST.read_text())
-    except Exception:
-        return None
-    branch = str(entry.get("branch") or "").strip()
-    return branch or None
+    for candidate in MANIFEST_CANDIDATES:
+        if not candidate.exists():
+            continue
+        try:
+            entry = json.loads(candidate.read_text())
+        except Exception:
+            continue
+        branch = str(entry.get("branch") or "").strip()
+        if branch:
+            return branch
+    return None
 
 
 def latest_tag():
