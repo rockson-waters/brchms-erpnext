@@ -1,0 +1,152 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "format:REST-RATE-{channel}-{#####}",
+ "creation": "2026-10-13 00:00:00.000000",
+ "description": "The instance rate card: what one service unit costs. This is the AUTHORITY -- the Rest app reads it when a purchase is created, so the price is decided once here instead of being retyped onto every purchase. A row with no Country Code is the channel default; a row WITH one applies only to that destination country and takes precedence, which is how a dearer SMS destination is priced without changing the rate for everywhere else.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "field_order": [
+  "channel",
+  "unit",
+  "column_break_1",
+  "price_per_unit_micros",
+  "currency",
+  "section_break_scope",
+  "country_code",
+  "is_active",
+  "section_break_window",
+  "effective_from",
+  "effective_to",
+  "notes"
+ ],
+ "fields": [
+  {
+   "description": "SMS and email credit are separate balances and are never interchangeable, so they are priced separately.",
+   "fieldname": "channel",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Channel",
+   "options": "sms\nemail",
+   "reqd": 1
+  },
+  {
+   "description": "What one unit of this channel is billed as. Defaults to the channel's own unit; a rate card that charged SMS in 'email messages' would be a unit error nobody could see from the price alone.",
+   "fieldname": "unit",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Unit",
+   "options": "sms_segment\nemail_message",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Price per unit in MILLIONTHS of a major unit, so 1.00 is 1000000 and 0.045 is 45000 exactly. The same scale the funding record and the app's ledger use, so no conversion happens anywhere between here and the money. An integer, never a float.",
+   "fieldname": "price_per_unit_micros",
+   "fieldtype": "Long Int",
+   "in_list_view": 1,
+   "label": "Price Per Unit (micros)",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "description": "The currency this price is quoted in. A price and a currency are one fact: an amount with no currency is not a price.",
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Currency",
+   "options": "Currency",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_scope",
+   "fieldtype": "Section Break",
+   "label": "Scope"
+  },
+  {
+   "description": "Leave BLANK for the channel default -- the price everywhere. Fill it in (with the plus sign, e.g. +233) to price one destination country differently. An exact-country row always beats the default, which is what makes a dearer destination possible without re-pricing the rest of the world.",
+   "fieldname": "country_code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Country Code"
+  },
+  {
+   "default": "1",
+   "description": "Switching this off retires the price WITHOUT deleting it, so a purchase already quoted against it keeps a row to be read back. Deleting the row would leave those purchases quoting nothing.",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Is Active"
+  },
+  {
+   "fieldname": "section_break_window",
+   "fieldtype": "Section Break",
+   "label": "Effective Window"
+  },
+  {
+   "description": "When this price starts applying. A change of price means ADDING a row from today, not editing this one -- the old row stays as the record of what was charged before.",
+   "fieldname": "effective_from",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Effective From",
+   "reqd": 1
+  },
+  {
+   "description": "When this price stops applying. Leave blank for 'until further notice'. A closed window is how a promotional or seasonal price expires on its own instead of being forgotten and undercharging for a year.",
+   "fieldname": "effective_to",
+   "fieldtype": "Datetime",
+   "label": "Effective To"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Credits",
+ "name": "Rest Credit Rate",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Rest Integration",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
