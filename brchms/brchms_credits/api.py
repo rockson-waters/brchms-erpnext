@@ -284,3 +284,70 @@ def count_funding(event_id=None):
 		frappe.throw(_("event_id is required."), frappe.MandatoryError)
 
 	return frappe.db.count(DOCTYPE, {"event_id": event_id})
+
+
+# The only event ids this API will ever delete. `forget_funding` refuses
+# anything else, so a caller cannot use it to remove real funding.
+TEST_EVENT_PREFIX = "erpnext-live-"
+
+
+@frappe.whitelist()
+def forget_funding(prefix=TEST_EVENT_PREFIX):
+	"""
+	Delete funding records whose `event_id` starts with `prefix`.
+
+	## Why this exists rather than the caller deleting rows
+
+	The integration user is deliberately READ-ONLY on this doctype (`read: 1`,
+	`create: 0`, `write: 0`, `delete: 0`), and only this method writes, via
+	`ignore_permissions`. So a caller cannot delete its own probe records — a
+	`DELETE /api/resource/...` returns HTTP 403.
+
+	That was discovered the hard way: the live verification harness *reported*
+	cleanup on every run while the deletes were being refused, and probe rows
+	accumulated until a later run failed on a duplicate `event_id`. A cleanup
+	path that lies about succeeding is worse than no cleanup.
+
+	## The narrowness is the point
+
+	This is the ONE destructive operation the app exposes, and it is deliberately
+	handicapped:
+
+	  * it deletes only rows whose `event_id` starts with `erpnext-live-` — the
+	    namespace the BRCHMS verification harness mints for itself — so it cannot
+	    touch a real funding record even if called with a hostile prefix
+	    (`prefix` is accepted for the caller's convenience but must still contain
+	    the guard below);
+	  * it returns what it actually deleted, so a caller can report the truth
+	    rather than assuming;
+	  * it refuses an empty or too-short prefix outright, because `LIKE '%'` would
+	    be every row in the table.
+	"""
+	prefix = (prefix or "").strip()
+
+	if len(prefix) < len(TEST_EVENT_PREFIX) or not prefix.startswith(TEST_EVENT_PREFIX):
+		frappe.throw(
+			_(
+				"This method only removes {0}* records; it is the BRCHMS verification harness's "
+				"namespace and refusing anything else is what stops it being used on real funding. "
+				"Received prefix {1}."
+			).format(TEST_EVENT_PREFIX, prefix or "(empty)")
+		)
+
+	names = frappe.get_all(
+		DOCTYPE,
+		filters={"event_id": ("like", f"{prefix}%")},
+		pluck="name",
+		limit_page_length=0,
+	)
+
+	deleted = []
+	for name in names:
+		# `ignore_permissions` for the same reason the insert uses it: this
+		# method is the authorisation boundary, not the caller's role.
+		frappe.delete_doc(DOCTYPE, name, ignore_permissions=True, force=True)
+		deleted.append(name)
+
+	frappe.db.commit()
+
+	return {"prefix": prefix, "deleted": deleted, "count": len(deleted)}
