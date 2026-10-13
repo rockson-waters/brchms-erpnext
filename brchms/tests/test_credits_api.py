@@ -24,7 +24,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from brchms.brchms_credits import api
 
-DOCTYPE = "BRCHMS Communication Credit Funding"
+DOCTYPE = "Rest Communication Credit Funding"
 
 
 def call(method, **kwargs):
@@ -379,7 +379,7 @@ class TestIntegrationRolePermissions(FrappeTestCase):
 	"""
 
 	def test_the_integration_role_cannot_create_on_the_doctype(self):
-		role = frappe.get_doc("Role", "BRCHMS Integration")
+		role = frappe.get_doc("Role", "Rest Integration")
 		perm = next(
 			(p for p in frappe.get_doc("DocType", DOCTYPE).permissions if p.role == role.name),
 			None,

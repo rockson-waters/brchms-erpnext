@@ -6,7 +6,7 @@ from frappe.model.document import Document
 from frappe.utils import now_datetime
 
 
-class BRCHMSCommunicationCreditFunding(Document):
+class RestCommunicationCreditFunding(Document):
 	"""
 	One confirmed funding event, and the invariants that make it trustworthy.
 

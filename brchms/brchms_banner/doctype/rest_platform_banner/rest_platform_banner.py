@@ -7,9 +7,9 @@ from frappe.model.document import Document
 from frappe.utils import get_datetime, now_datetime
 
 
-class BRCHMSPlatformBanner(Document):
+class RestPlatformBanner(Document):
 	"""
-	A notice the BRCHMS app shows on every page.
+	A notice the Rest app shows on every page.
 
 	The window is validated here so a banner that can never appear is refused at
 	authoring time rather than discovered later. The app evaluates the same window

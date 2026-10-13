@@ -11,7 +11,7 @@ The funding authority's API.
 **Replaying the same `event_id` returns the SAME record.** It does not create a
 second row and it does not raise.
 
-That is not a nicety. BRCHMS reaches this instance over Cloudflare from a
+That is not a nicety. Rest reaches this instance over Cloudflare from a
 different network, and the request can succeed here while the response is lost
 in transit. The app then has no way to know whether the funding landed, so it
 retries -- and if this method created a new row on every call, a single lost
@@ -39,7 +39,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, now_datetime
 
-DOCTYPE = "BRCHMS Communication Credit Funding"
+DOCTYPE = "Rest Communication Credit Funding"
 
 # Every field the app sends. Kept as a tuple so the "missing field" message can
 # name the fields rather than say "invalid request".
@@ -134,14 +134,14 @@ def _insert_funding(payload):
 	## Permissions, and why the insert ignores them
 
 	The integration user has **read-only** access to this doctype, deliberately:
-	the `BRCHMS Integration` role carries `read: 1` and `create: 0`, so a leaked
+	the `Rest Integration` role carries `read: 1` and `create: 0`, so a leaked
 	key cannot add, change or delete rows. Only this method may write one.
 
 	That is why the insert sets `ignore_permissions=True`. Without it Frappe
 	refuses with:
 
 	    PermissionError: User integration@breamal.com does not have doctype access
-	    via role permission for document BRCHMS Communication Credit Funding
+	    via role permission for document Rest Communication Credit Funding
 
 	— measured against the live site, on the first end-to-end call. The
 	whitelisted method IS the authorisation boundary, and the roles stay read-only,
@@ -228,7 +228,7 @@ def _normalise(payload):
 
 def _as_response(doc):
 	"""
-	The exact shape BRCHMS parses, wrapped by Frappe in `message`.
+	The exact shape Rest parses, wrapped by Frappe in `message`.
 
 	Every value is a STRING except the two that are naturally textual, mirroring
 	the app's `biginteger` discipline: its ledger parses units and money as
@@ -314,7 +314,7 @@ def forget_funding(prefix=TEST_EVENT_PREFIX):
 	handicapped:
 
 	  * it deletes only rows whose `event_id` starts with `erpnext-live-` — the
-	    namespace the BRCHMS verification harness mints for itself — so it cannot
+	    namespace the Rest verification harness mints for itself — so it cannot
 	    touch a real funding record even if called with a hostile prefix
 	    (`prefix` is accepted for the caller's convenience but must still contain
 	    the guard below);
@@ -328,7 +328,7 @@ def forget_funding(prefix=TEST_EVENT_PREFIX):
 	if len(prefix) < len(TEST_EVENT_PREFIX) or not prefix.startswith(TEST_EVENT_PREFIX):
 		frappe.throw(
 			_(
-				"This method only removes {0}* records; it is the BRCHMS verification harness's "
+				"This method only removes {0}* records; it is the Rest verification harness's "
 				"namespace and refusing anything else is what stops it being used on real funding. "
 				"Received prefix {1}."
 			).format(TEST_EVENT_PREFIX, prefix or "(empty)")

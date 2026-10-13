@@ -1,6 +1,14 @@
 """
-BRCHMS — funding authority and announcement banner for the BRCHMS
+Rest — funding authority and announcement banner for the Rest
 church-management system.
+
+NOTE ON NAMES: the APP is "Rest" (see `app_title` in hooks.py, and the two
+doctypes). The Python package, the Frappe app name, the module directories and
+the repository keep the historical `brchms` identifier, because those are the
+machine keys that the consuming application addresses:
+`brchms.brchms_credits.api.confirm_funding`. Renaming them is a cross-repository
+change with a window where the two sides disagree, and it buys nothing anyone
+reads. Where a human sees a name, it says Rest.
 """
 
 # Frappe reads an app's version with `frappe.get_attr(app + ".__version__")` and

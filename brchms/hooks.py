@@ -1,5 +1,5 @@
 """
-BRCHMS — the Frappe app that lets the BRCHMS church-management system reach this
+Rest — the Frappe app that lets the Rest church-management system reach this
 ERPNext instance.
 
 Two jobs, deliberately in ONE app:
@@ -26,9 +26,9 @@ be copied into a running container and survive. See README.md.
 """
 
 app_name = "brchms"
-app_title = "BRCHMS"
+app_title = "Rest"
 app_publisher = "Breamal"
-app_description = "Funding authority and announcement banner for the BRCHMS church-management system"
+app_description = "Funding authority and announcement banner for the Rest church-management system"
 app_email = "no-reply@breamal.com"
 app_license = "mit"
 
@@ -47,5 +47,5 @@ required_apps = ["frappe"]
 # be granted anything, and the first API call fails with a permission error that
 # says nothing about the missing role.
 fixtures = [
-    {"dt": "Role", "filters": [["role_name", "in", ["BRCHMS Integration", "BRCHMS Banner Manager"]]]},
+    {"dt": "Role", "filters": [["role_name", "in", ["Rest Integration", "Rest Banner Manager"]]]},
 ]

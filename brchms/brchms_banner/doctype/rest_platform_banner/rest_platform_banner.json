@@ -2,7 +2,7 @@
  "actions": [],
  "allow_rename": 0,
  "creation": "2026-10-12 00:00:00.000000",
- "description": "The platform-wide announcement banner the BRCHMS app shows on every page: maintenance windows, upgrades, and anything else every user must see. One record per notice; several may be scheduled, and the app is served the single most recent one whose window is open.",
+ "description": "The platform-wide announcement banner the Rest app shows on every page: maintenance windows, upgrades, and anything else every user must see. One record per notice; several may be scheduled, and the app is served the single most recent one whose window is open.",
  "doctype": "DocType",
  "document_type": "Document",
  "engine": "InnoDB",
@@ -87,9 +87,9 @@
  "modified": "2026-10-12 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Brchms Banner",
- "name": "BRCHMS Platform Banner",
+ "name": "Rest Platform Banner",
  "naming_rule": "Expression (old style)",
- "autoname": "format:BRCHMS-BANNER-{#####}",
+ "autoname": "format:REST-BANNER-{#####}",
  "owner": "Administrator",
  "permissions": [
   {
@@ -100,7 +100,7 @@
    "print": 1,
    "read": 1,
    "report": 1,
-   "role": "BRCHMS Banner Manager",
+   "role": "Rest Banner Manager",
    "share": 1,
    "write": 1
   },
@@ -124,7 +124,7 @@
    "print": 0,
    "read": 1,
    "report": 0,
-   "role": "BRCHMS Integration",
+   "role": "Rest Integration",
    "share": 0,
    "write": 0
   }

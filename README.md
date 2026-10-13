@@ -1,17 +1,23 @@
-# brchms — the Frappe app behind the BRCHMS connection
+# Rest — the Frappe app behind the Rest connection
+
+The app is called **Rest**. The Python package, the Frappe app name, the module
+directories and this repository keep the historical `brchms` identifier, because
+those are the machine keys the consuming application addresses
+(`brchms.brchms_credits.api.confirm_funding`). Where a human reads a name, it says
+Rest.
 
 Two jobs, in one app:
 
 | Module | What it is |
 | --- | --- |
-| `brchms_credits` | The **funding authority**. `confirm_funding` records what has been paid for — once — and hands the BRCHMS app the units and money it needs to move its own credit ledger. |
-| `brchms_banner` | The **announcement banner** the BRCHMS app shows on every page (maintenance, upgrades, outages). |
+| `brchms_credits` | The **funding authority**. `confirm_funding` records what has been paid for — once — and hands the Rest app the units and money it needs to move its own credit ledger. |
+| `brchms_banner` | The **announcement banner** the Rest app shows on every page (maintenance, upgrades, outages). |
 
 One app rather than two: they share one deployment, one integration user, one
 image rebuild and one version. Nothing separates them enough to justify doubling
 each of those.
 
-## The contract BRCHMS speaks
+## The contract Rest speaks
 
 Both endpoints are whitelisted methods, so Frappe wraps their return value in
 `message`. Both use token auth: `Authorization: token <api_key>:<api_secret>`.
@@ -56,7 +62,7 @@ micros = 11250 minor = 112.50 CAD.
 
 **`event_id` is the idempotency key and is unique on the doctype.** Replaying a
 confirmation returns the same record and creates exactly one row. This is not a
-nicety: BRCHMS reaches this instance over the network, the request can succeed
+nicety: Rest reaches this instance over the network, the request can succeed
 here while the response is lost, and the app then has no way to know whether the
 funding landed. Without the unique key a single lost response would leave this
 instance holding two records for money paid once.
@@ -118,20 +124,26 @@ deploy until the app is reinstalled.
 a `.env` file on a different host; a token that can do everything is a bad thing
 to leave lying in one.
 
-1. **User → New**: `integration@breamal.com`, System User, and **no roles** except the two below.
-2. Assign exactly these roles:
-   - `BRCHMS Integration` — read the funding and banner doctypes. That is all it needs to call both methods.
-   - `BRCHMS Banner Manager` — only if this user will also *author* banners. A separate credential for authoring is better.
+1. **User → New**: `restapp@breamal.com`, System User, **no roles**.
+2. Assign **exactly one**: `Rest Integration`.
+   - `Rest Integration` — read the funding and banner doctypes. That is the whole
+     requirement for calling both methods: `confirm_funding` reaches the database
+     as the method, not as the calling user, so the credential never needs
+     create, write or delete on the doctype. Verified live: this role carries
+     `read: 1`, `create: 0`, `write: 0`, `delete: 0`.
+   - `Rest Banner Manager` — is for a **human** who authors notices, not for this
+     user. Giving the app's credential the ability to change the notice every
+     user sees is a privilege it has no use for.
 3. **Settings → API Access → Generate Keys.** The secret is shown once.
 
 CLI alternative (verify the signature against your v16 build before relying on it):
 
 ```bash
 bench --site frontend execute frappe.core.doctype.user.user.generate_keys \
-  --kwargs "{'user': 'integration@breamal.com'}"
+  --kwargs "{'user': 'restapp@breamal.com'}"
 ```
 
-Then, in the BRCHMS backend's environment:
+Then, in the Rest backend's environment:
 
 | Variable | Value |
 | --- | --- |
@@ -145,7 +157,7 @@ and set `COMMUNICATION_CREDIT_PROVIDER=erpnext` and/or
 `PLATFORM_BANNER_PROVIDER=erpnext` when ready. **Never commit the key or
 secret.**
 
-`ERPNEXT_INSTANCE_ID` is not cosmetic: BRCHMS refuses a confirmation when it is
+`ERPNEXT_INSTANCE_ID` is not cosmetic: Rest refuses a confirmation when it is
 unset, because the idempotency key it builds would not be unique across
 instances and could collide with another deployment's.
 

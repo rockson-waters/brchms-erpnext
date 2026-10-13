@@ -24,7 +24,7 @@ from frappe.utils import add_to_date, now_datetime
 
 from brchms.brchms_banner import api
 
-DOCTYPE = "BRCHMS Platform Banner"
+DOCTYPE = "Rest Platform Banner"
 
 
 def make_banner(**overrides):

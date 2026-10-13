@@ -6,7 +6,7 @@ The announcement banner's API.
 
 `POST /api/method/brchms.brchms_banner.api.get_active_banner`
 
-Returns the one banner the BRCHMS app should show right now, or `None` when there
+Returns the one banner the Rest app should show right now, or `None` when there
 is nothing to show.
 
 ## Why "or None" is the whole contract
@@ -30,7 +30,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, now_datetime
 
-DOCTYPE = "BRCHMS Platform Banner"
+DOCTYPE = "Rest Platform Banner"
 
 # The banner text caps the app enforces on its side. Enforced here too so an
 # over-long notice is refused where it is written, rather than being silently
@@ -95,7 +95,7 @@ def _window_open(row, now):
 
 def _as_response(row):
 	"""
-	The shape BRCHMS projects onto its render contract.
+	The shape Rest projects onto its render contract.
 
 	`message` is passed through as stored: the app runs the value through
 	`sanitizeHtml()` on the client, which is the one place that can know what the
