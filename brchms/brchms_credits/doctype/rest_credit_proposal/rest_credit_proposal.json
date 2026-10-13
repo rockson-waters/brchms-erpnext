@@ -46,8 +46,10 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "length": 140,
-   "description": "The reference the customer already uses for this payment -- an invoice number, or the narration they put on a bank transfer. OPTIONAL, and not the proposal's identity: a cash customer has no reference to give, and a gateway transaction has none until it completes. The operator finds a proposal by this, by the group, by the amount, or by the proposal code read from the customer's receipt.",
-   "search_index": 1
+   "description": "The reference this proposal is identified by, and what a payment is matched against. UNIQUE PER DEPLOYMENT (a composite index, because two churches may legitimately use the same number). ALWAYS present: the deployment sends its own if the customer has one, and the app mints a short readable one otherwise -- a cash customer has no reference to give, and a proposal without a reference is unmatchable rather than merely hard to find. Because it is unique, matching returns exactly one proposal and needs no disambiguation.",
+   "search_index": 1,
+   "reqd": 1,
+   "unique": 1
   },
   {
    "fieldname": "request_key",

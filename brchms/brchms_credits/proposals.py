@@ -19,9 +19,13 @@ Conflating them is what made the first version unable to serve cash at all.
   * **The claim code** is the proposal's own name (`PROP-00981`). Internal, never
     shown to customers, and never typed by them. It is what a gateway echoes back in
     its transaction metadata and what staff read off a receipt.
-  * **The customer's reference** (`purchase_reference`) is whatever the payer already
-    uses -- an invoice number, a bank transfer narration. OPTIONAL, because a cash
-    customer has none to give and a gateway transaction has none until it completes.
+  * **The reference** (`purchase_reference`) is what a payment is matched against, and
+    it is ALWAYS present and UNIQUE PER DEPLOYMENT. The deployment sends the payer's own
+    if there is one (an invoice number, a bank narration); when there is none -- a cash
+    customer, or a gateway transaction that has not happened yet -- the app MINTS a
+    short readable one. Minting rather than asking is the whole point: the payer is
+    handed a reference instead of being asked to invent one, which people do badly and
+    then misremember.
   * **The payment reference** (`payment_reference`) is what the MONEY is identified
     by: the bank's transaction reference, the gateway's id, or the receipt number
     issued at the desk. It exists only after payment, so it cannot be asked for
@@ -29,12 +33,19 @@ Conflating them is what made the first version unable to serve cash at all.
 
 ## Idempotency
 
-`create_proposal` is keyed on `(instance_id, request_key)`, where `request_key` is
-the deployment's own purchase identifier. A retry after a lost response returns the
-existing proposal rather than raising a second one -- a duplicate proposal is a
-request for money nobody asked for, sitting in the operator's list waiting to be
-paid twice.
+Two keys, because they answer different questions and both are needed:
+
+  * `(instance_id, request_key)` -- the deployment's own purchase id, so a retry after
+    a lost response returns the SAME proposal rather than raising a second one;
+  * `(instance_id, purchase_reference)` -- a database uniqueness constraint, so the
+    operator's lookup can never match two proposals. Ambiguity is impossible rather
+    than reported, which is stronger: a warning depends on somebody reading it.
+
+A duplicate proposal is a request for money nobody asked for, sitting in the
+operator's list waiting to be paid twice. Both keys exist to make that unreachable.
 """
+
+import secrets
 
 import frappe
 from frappe import _
@@ -132,6 +143,76 @@ def create_proposal(
 	if existing:
 		return _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, existing), created=False)
 
+	# The reference is always present, and never invented by the payer.
+	#
+	# A cash customer has nothing to quote and should not be asked to make something
+	# up; a gateway transaction has no reference until it completes. So when the
+	# deployment sends none, one is MINTED and handed over -- which is also what makes
+	# the operator's lookup unambiguous, because the reference is unique.
+	supplied_reference = payload.get("purchase_reference")
+	if not supplied_reference:
+		return _insert_with_minted_reference(payload, request_key)
+
+	doc = _insert_proposal(payload, request_key)
+	if doc is None:
+		# The reference is taken by an existing proposal for this deployment. An
+		# identical retry lands here, and so does a genuine collision on a
+		# customer-supplied reference -- both resolve to the same answer.
+		winner = _find_by_reference(payload["instance_id"], supplied_reference)
+		if winner:
+			return _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, winner), created=False)
+		frappe.throw(
+			_(
+				"Reference '{0}' is already used by another proposal for this deployment. Use a "
+				"different reference, or settle the existing proposal."
+			).format(frappe.utils.escape_html(cstr(supplied_reference))),
+			frappe.ValidationError,
+		)
+
+	return _proposal_response(doc, created=True)
+
+
+def _insert_with_minted_reference(payload, request_key):
+	"""
+	Insert with a freshly minted reference, retrying if the mint collides.
+
+	The DATABASE decides whether a reference is taken, not a pre-check: a pre-check
+	races, and two callers can both see a reference free. The unique index is the
+	authority, and the retry is what makes the mint safe.
+
+	Bounded, because an unbounded retry on a genuinely broken constraint would spin.
+	"""
+	for _attempt in range(MINT_ATTEMPTS):
+		candidate = dict(payload)
+		candidate["purchase_reference"] = mint_reference()
+
+		doc = _insert_proposal(candidate, request_key)
+		if doc is not None:
+			return _proposal_response(doc, created=True)
+
+		# The insert failed. If it failed because the REQUEST KEY now exists, a
+		# concurrent retry won and its proposal is the answer.
+		winner = _find_proposal(payload["instance_id"], request_key)
+		if winner:
+			return _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, winner), created=False)
+
+	frappe.throw(
+		_(
+			"Could not allocate a unique reference after {0} attempts. Nothing was raised; "
+			"please retry."
+		).format(MINT_ATTEMPTS),
+		frappe.ValidationError,
+	)
+
+
+def _insert_proposal(payload, request_key):
+	"""
+	Insert one proposal, or answer None when it lost a race.
+
+	Re-reads the winner rather than letting a raw integrity error escape, because the
+	loser of a legitimate retry has SUCCEEDED -- the proposal exists, once -- and
+	should be told so rather than shown a database error.
+	"""
 	doc = frappe.get_doc(
 		{
 			"doctype": PROPOSAL_DOCTYPE,
@@ -144,14 +225,11 @@ def create_proposal(
 		doc.flags.ignore_permissions = True
 		doc.insert()
 	except frappe.UniqueValidationError:
-		# Lost a race with a concurrent retry. The winner's proposal is the answer;
-		# raising a second one would be a request for money nobody asked for.
-		winner = _find_proposal(payload["instance_id"], request_key)
-		if winner:
-			return _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, winner), created=False)
-		raise
+		return None
+	except frappe.DuplicateEntryError:
+		return None
 
-	return _proposal_response(doc, created=True)
+	return doc
 
 
 @frappe.whitelist()
@@ -188,83 +266,79 @@ def get_proposal(instance_id=None, request_key=None, proposal=None):
 
 
 @frappe.whitelist()
-def find_pending_proposals(
+def find_pending_proposal(
 	instance_id=None,
 	purchase_reference=None,
 	group_name=None,
 	amount_minor=None,
-	limit=10,
 ):
 	"""
-	Find the proposal a payment belongs to, for the operator at the desk.
+	The one proposal a payment belongs to, for the operator at the desk.
 
-	## Why a search and not a typed code
+	## Ambiguity is impossible, not reported
 
-	The proposal code is deliberately not shown to customers, so the operator cannot
-	ask for it. What they have is what the customer brings: their own reference (an
-	invoice number, a transfer narration), the group, and the money that actually
-	arrived.
+	`purchase_reference` is unique per deployment, so a reference identifies exactly
+	one proposal. That is stronger than the previous version, which returned every
+	candidate and set an `ambiguous` flag: a warning depends on somebody reading it,
+	while a unique index does not.
 
-	## Why ambiguity is REPORTED
+	Where a reference is NOT supplied, the search falls back to group and amount --
+	and can still match more than one, because those are not unique. That case is
+	refused with a message saying so rather than guessed at: settling one request
+	against another's payment is exactly the failure this design exists to prevent.
 
-	Several pending proposals can match -- a group paying the same amount twice, or two
-	groups sharing a reference. Returning the most recent would be right most of the
-	time and silently wrong the rest, settling one request against another's payment.
-	So every candidate is returned with `ambiguous` set, and the operator chooses. The
-	amount that arrived is what usually disambiguates, which is why it is a filter.
+	Answers `{"proposal": <payload>|None, "reason": ...}`. `None` means nothing
+	matched; a refusal means more than one did.
 	"""
 	instance_id = cstr(instance_id).strip()
 	if not instance_id:
 		frappe.throw(_("instance_id is required."), frappe.MandatoryError)
 
-	filters = {"instance_id": instance_id, "docstatus": 0}
+	reference = cstr(purchase_reference).strip()
 
-	if cstr(purchase_reference).strip():
-		filters["purchase_reference"] = cstr(purchase_reference).strip()
+	if reference:
+		name = _find_by_reference(instance_id, reference)
+		if not name:
+			return {"proposal": None, "reason": "no proposal carries that reference"}
+		doc = frappe.get_doc(PROPOSAL_DOCTYPE, name)
+		if doc.docstatus != 0:
+			return {
+				"proposal": _proposal_response(doc),
+				"reason": "this proposal is already {0}".format(
+					"settled" if doc.docstatus == 1 else "cancelled"
+				),
+			}
+		return {"proposal": _proposal_response(doc), "reason": None}
+
+	# No reference. Narrow by what the operator knows, and refuse to guess.
+	filters = {"instance_id": instance_id, "docstatus": 0}
 	if cstr(group_name).strip():
 		filters["group_name"] = cstr(group_name).strip()
 	if amount_minor not in (None, ""):
 		filters["amount_minor"] = cint(amount_minor)
 
-	rows = frappe.get_all(
+	matches = frappe.get_all(
 		PROPOSAL_DOCTYPE,
 		filters=filters,
-		fields=[
-			"name",
-			"purchase_reference",
-			"request_key",
-			"group_name",
-			"channel",
-			"units",
-			"amount_minor",
-			"currency",
-			"creation",
-			"expires_at",
-		],
+		fields=["name"],
 		order_by="creation desc",
-		limit_page_length=max(1, min(cint(limit) or 10, 50)),
+		limit_page_length=2,
 	)
 
-	now = now_datetime()
-	candidates = []
-	for row in rows:
-		expired = bool(row.expires_at) and cstr(row.expires_at) < cstr(now)
-		candidates.append(
-			{
-				**row,
-				"expired": expired,
-				# The customer-facing label: what they actually brought with them.
-				"reference_shown": row.purchase_reference or None,
-			}
+	if not matches:
+		return {"proposal": None, "reason": "nothing pending matches"}
+
+	if len(matches) > 1:
+		frappe.throw(
+			_(
+				"More than one pending proposal matches, and settling the wrong one would attribute "
+				"a payment to another group's request. Narrow it by the payment reference, or by the "
+				"exact amount that arrived."
+			),
+			frappe.ValidationError,
 		)
 
-	return {
-		"candidates": candidates,
-		"count": len(candidates),
-		# More than one match is the operator's decision, not ours.
-		"ambiguous": len(candidates) > 1,
-		"expired_count": sum(1 for c in candidates if c["expired"]),
-	}
+	return {"proposal": _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, matches[0].name)), "reason": None}
 
 
 @frappe.whitelist()
@@ -387,6 +461,23 @@ def _proposal_response(doc, created=None):
 	return response
 
 
+def _find_by_reference(instance_id, purchase_reference):
+	"""
+	The proposal one reference identifies, or None.
+
+	At most one, by the unique index -- which is the point of making the reference
+	unique. Before that, this could return several and the operator had to choose.
+	"""
+	if not instance_id or not purchase_reference:
+		return None
+
+	return frappe.db.get_value(
+		PROPOSAL_DOCTYPE,
+		{"instance_id": instance_id, "purchase_reference": purchase_reference},
+		"name",
+	)
+
+
 def _find_proposal(instance_id, request_key):
 	"""
 	The proposal for one deployment's request key, or None.
@@ -428,6 +519,35 @@ def _as_integer(value, fieldname):
 		frappe.throw(_("{0} cannot be negative.").format(fieldname))
 
 	return number
+
+
+# Readable alphabet: no I, O, 0 or 1, so a reference cannot be misread off a slip or
+# mistyped at a desk. Ambiguity between characters is how a reference stops matching.
+REFERENCE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+REFERENCE_LENGTH = 8
+
+# Bounded, because an unbounded retry against a broken constraint would spin.
+MINT_ATTEMPTS = 5
+
+
+def mint_reference():
+	"""
+	A short, readable, unique-per-deployment reference.
+
+	Handed to the payer rather than requested from them. A cash customer has nothing
+	to quote and should not be asked to invent something; a gateway transaction has no
+	reference until it completes. Minting closes both gaps with one mechanism, and it
+	is what makes the operator's lookup unambiguous.
+
+	Shape `XXXX-XXXX` from an alphabet without I/O/0/1, so it survives being read aloud
+	and written on a receipt. Collisions are handled by the caller retrying against the
+	database's uniqueness constraint -- the constraint decides, not a pre-check, because
+	a pre-check races.
+	"""
+	return "{0}-{1}".format(
+		"".join(secrets.choice(REFERENCE_ALPHABET) for _ in range(REFERENCE_LENGTH // 2)),
+		"".join(secrets.choice(REFERENCE_ALPHABET) for _ in range(REFERENCE_LENGTH // 2)),
+	)
 
 
 def _cap(text, limit=200):
@@ -477,3 +597,56 @@ def _touch_instance(instance_id, display_name=None):
 			.format(INSTANCE_DOCTYPE),
 			{"display_name": display_name, "instance": instance_id},
 		)
+
+
+def after_migrate():
+	"""
+	Called by `bench migrate` via the hook in `hooks.py`.
+
+	Idempotent, and silent when the index is already there -- a migration runs on every
+	deploy and must not fail because its work was already done.
+	"""
+	if ensure_uniqueness_constraint():
+		frappe.logger().info("brchms: added the unique purchase_reference index")
+
+
+def ensure_uniqueness_constraint():
+	"""
+	Put the database constraint that makes ambiguity impossible.
+
+	## Why this is not just `"unique": 1` on the field
+
+	Frappe creates a unique index only for a field used as the document NAME. This
+	doctype is named by series (`PROP-00981`) and identifies payments by
+	`purchase_reference`, so the field flag alone would have produced no constraint at
+	all -- the setting would have looked right, and two proposals could have shared a
+	reference exactly as before.
+
+	## Why the key is composite
+
+	Uniqueness is per DEPLOYMENT. Two churches may legitimately both use `INV-001`, and
+	a global constraint would refuse the second one for no reason.
+
+	Idempotent, so `bench migrate` can run it every time.
+	"""
+	table = "tab{0}".format(PROPOSAL_DOCTYPE)
+	index_name = "unique_instance_purchase_reference"
+
+	try:
+		existing = frappe.db.sql(
+			"SHOW INDEX FROM `{0}` WHERE Key_name = %s".format(table), (index_name,)
+		)
+	except Exception:
+		return False
+
+	if existing:
+		return False
+
+	# `frappe.db.add_unique` is the right call, not a raw `ALTER TABLE`. Frappe refuses
+	# DDL through `db.sql` inside a transaction ("This statement can cause implicit
+	# commit"), and the migration IS inside one -- so the first version threw and the
+	# index was never created. `add_unique` commits around the statement itself.
+	frappe.db.add_unique(
+		PROPOSAL_DOCTYPE, ["instance_id", "purchase_reference"], constraint_name=index_name
+	)
+	return True

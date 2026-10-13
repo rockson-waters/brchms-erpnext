@@ -36,6 +36,7 @@ app_license = "mit"
 # the version in `__init__.py` cannot drift. `frappe.get_attr(app
 # + ".__version__")` is what `bench list-apps` uses; `pyproject.toml` is not
 # consulted at all.
+import frappe  # noqa: E402
 from brchms import __version__ as app_version  # noqa: E402
 
 # The app has no desk UI of its own: it is an API surface plus two doctypes, and
@@ -71,3 +72,18 @@ doc_events = {
 fixtures = [
     {"dt": "Role", "filters": [["role_name", "in", ["Rest Integration", "Rest Banner Manager"]]]},
 ]
+
+
+# Schema the doctype flags cannot express.
+#
+# A DOTTED PATH, not a function defined here. Frappe only registers a hook that is a
+# string: a function written into `hooks.py` is called when Frappe collects callables,
+# but `frappe.get_hooks("after_migrate")` does not list it -- so it appeared to be
+# wired while never running, and the unique index it was supposed to create did not
+# exist. Verified with `bench execute frappe.get_hooks`.
+#
+# `purchase_reference` is unique PER DEPLOYMENT, and Frappe creates a unique index
+# only for a field used as the document NAME -- so leaving this to the doctype's
+# `unique: 1` flag would have produced no constraint at all, and two proposals could
+# share the reference the operator matches payments by.
+after_migrate = ["brchms.brchms_credits.proposals.after_migrate"]

@@ -158,17 +158,17 @@ class TestProposalCreation(ProposalTestCase):
 
 		self.assertNotEqual(first["proposal"], second["proposal"])
 
-	def test_a_proposal_can_be_raised_with_no_customer_reference(self):
+	def test_a_proposal_is_never_left_without_a_reference(self):
 		"""
-		The reference is OPTIONAL, and that is a correction rather than a relaxation.
-		A cash customer has no reference to give, and a gateway transaction has none
-		until it completes -- so requiring one made cash purchases impossible and
-		forced a customer to invent a number they would then misremember.
+		A reference is ALWAYS present, because it is what a payment is matched against
+		and it is unique. The deployment sends the payer's own when there is one; when
+		there is none, one is minted. A proposal with no reference is unmatchable -- not
+		hard to find, impossible.
 		"""
 		result = proposals.create_proposal(**proposal_payload(purchase_reference=None))
 
 		self.assertEqual(result["state"], "draft")
-		self.assertIsNone(result["purchase_reference"])
+		self.assertTrue(result["purchase_reference"])
 
 	def test_the_request_key_is_what_makes_a_retry_idempotent(self):
 		"""
@@ -538,51 +538,116 @@ class TestFindingTheRightProposal(ProposalTestCase):
 	arrived.
 	"""
 
-	def test_finds_by_the_customers_own_reference(self):
+	def test_finds_by_the_reference(self):
 		proposals.create_proposal(**proposal_payload(purchase_reference="INV-TEST-7777"))
 
-		found = proposals.find_pending_proposals(
+		found = proposals.find_pending_proposal(
 			instance_id=INSTANCE, purchase_reference="INV-TEST-7777"
 		)
 
-		self.assertEqual(found["count"], 1)
-		self.assertFalse(found["ambiguous"])
-		self.assertEqual(found["candidates"][0]["request_key"], REQUEST_KEY)
+		self.assertEqual(found["proposal"]["request_key"], REQUEST_KEY)
+		self.assertIsNone(found["reason"])
 
-	def test_finds_a_cash_proposal_that_has_no_reference_at_all(self):
+	def test_a_cash_proposal_is_given_a_reference_rather_than_asking_for_one(self):
 		"""
-		The case the old design could not serve: a group with no reference. The operator
-		finds it by group and amount instead.
+		The case the first design could not serve at all. A customer paying cash has
+		nothing to quote and should not be asked to invent something, so the app MINTS
+		a reference and hands it over -- which is also what makes the lookup unique.
 		"""
-		proposals.create_proposal(
+		result = proposals.create_proposal(
 			**proposal_payload(purchase_reference=None, group_name="Cash Group", amount_minor=10000)
 		)
 
-		found = proposals.find_pending_proposals(
-			instance_id=INSTANCE, group_name="Cash Group", amount_minor=10000
+		self.assertTrue(result["purchase_reference"], "a reference must always be present")
+		self.assertRegex(result["purchase_reference"], r"^[A-Z2-9]{4}-[A-Z2-9]{4}$")
+
+		found = proposals.find_pending_proposal(
+			instance_id=INSTANCE, purchase_reference=result["purchase_reference"]
 		)
+		self.assertEqual(found["proposal"]["proposal"], result["proposal"])
 
-		self.assertEqual(found["count"], 1)
-		self.assertIsNone(found["candidates"][0]["reference_shown"])
-
-	def test_two_matching_proposals_are_reported_as_ambiguous(self):
+	def test_a_minted_reference_never_uses_a_confusable_character(self):
 		"""
-		Returning the most recent would be right most of the time and silently wrong the
-		rest, settling one request against another's payment. The operator decides.
+		I, O, 0 and 1 are excluded. A reference is read off a slip and typed at a desk,
+		and a confusable character is how a reference stops matching.
+		"""
+		for _ in range(20):
+			self.assertNotRegex(proposals.mint_reference(), r"[IO01]")
+
+	def test_minted_references_are_unique_in_practice(self):
+		minted = {proposals.mint_reference() for _ in range(200)}
+		self.assertEqual(len(minted), 200)
+
+	def test_a_reference_cannot_be_shared_by_two_proposals(self):
+		"""
+		THE POINT OF THE UNIQUE INDEX. Two proposals sharing a reference would make the
+		operator's lookup ambiguous, and ambiguity here means settling one request
+		against another group's payment. It is made impossible rather than reported.
 		"""
 		proposals.create_proposal(
 			**proposal_payload(request_key="test-request-a", purchase_reference="INV-TEST-DUP")
 		)
-		proposals.create_proposal(
+		second = proposals.create_proposal(
 			**proposal_payload(request_key="test-request-b", purchase_reference="INV-TEST-DUP")
 		)
 
-		found = proposals.find_pending_proposals(
-			instance_id=INSTANCE, purchase_reference="INV-TEST-DUP"
+		# The second is the FIRST proposal: the reference identifies it, so the request
+		# resolves to the proposal already carrying that reference rather than raising
+		# a duplicate of it.
+		self.assertFalse(second.get("created", True))
+		self.assertEqual(
+			frappe.db.count(PROPOSAL, {"instance_id": INSTANCE, "purchase_reference": "INV-TEST-DUP"}),
+			1,
 		)
 
-		self.assertEqual(found["count"], 2)
-		self.assertTrue(found["ambiguous"])
+	def test_a_group_and_amount_match_still_refuses_to_guess(self):
+		"""
+		Group and amount are not unique, so this search CAN match more than one. It
+		refuses rather than picking the most recent, which would be right most of the
+		time and silently wrong the rest -- and settling the wrong one attributes a
+		payment to another group's request.
+
+		The two proposals need DIFFERENT request keys: sharing one makes the second
+		resolve to the first, leaving only one pending and nothing to be ambiguous
+		about. That is what made the first version of this test pass a guard it never
+		reached.
+		"""
+		proposals.create_proposal(
+			**proposal_payload(
+				request_key="test-request-a",
+				purchase_reference="INV-TEST-AMB-A",
+				group_name="Cash Group",
+				amount_minor=10000,
+			)
+		)
+		proposals.create_proposal(
+			**proposal_payload(
+				request_key="test-request-b",
+				purchase_reference="INV-TEST-AMB-B",
+				group_name="Cash Group",
+				amount_minor=10000,
+			)
+		)
+
+		pending = proposals.list_pending_proposals(instance_id=INSTANCE)
+		self.assertEqual(pending["pending"], 2, "the fixture did not leave two pending proposals")
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			proposals.find_pending_proposal(
+				instance_id=INSTANCE, group_name="Cash Group", amount_minor=10000
+			)
+
+		self.assertIn("More than one pending proposal", str(caught.exception))
+
+	def test_an_unknown_reference_says_so_rather_than_refusing(self):
+		# "nothing carries that reference" and "more than one matched" are different
+		# answers; the first is the operator's typo, the second needs a decision.
+		found = proposals.find_pending_proposal(
+			instance_id=INSTANCE, purchase_reference="NOSUCH-REF"
+		)
+
+		self.assertIsNone(found["proposal"])
+		self.assertIn("no proposal", found["reason"])
 
 	def test_a_settled_proposal_is_not_a_candidate(self):
 		"""It has already been paid for; offering it again invites paying twice."""
@@ -594,9 +659,9 @@ class TestFindingTheRightProposal(ProposalTestCase):
 		doc.flags.ignore_permissions = True
 		doc.submit()
 
-		found = proposals.find_pending_proposals(instance_id=INSTANCE, amount_minor=10000)
+		found = proposals.find_pending_proposal(instance_id=INSTANCE, amount_minor=10000)
 
-		self.assertEqual(found["count"], 0)
+		self.assertIsNone(found["proposal"])
 
 	def test_another_deployments_proposals_are_never_candidates(self):
 		"""One tenant must not be able to find, or settle, another's request."""
@@ -604,9 +669,9 @@ class TestFindingTheRightProposal(ProposalTestCase):
 			**proposal_payload(instance_id="test:proposal-other", request_key="test-request-x")
 		)
 
-		found = proposals.find_pending_proposals(instance_id=INSTANCE)
+		found = proposals.find_pending_proposal(instance_id=INSTANCE)
 
-		self.assertEqual(found["count"], 0)
+		self.assertIsNone(found["proposal"])
 
 
 class TestIntegrationRoleCannotSettle(FrappeTestCase):
