@@ -1,0 +1,104 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-10-13 00:00:00.000000",
+ "description": "Where a customer goes to buy credits, and how the app is told. A singleType because there is one answer: several rows would raise the question of which applies, and the app must never have to decide that. The app renders this URL; it does NOT handle the payment -- the gateway, the webform and the settlement all live here in ERPNext, which is why nothing about who vouches for money changes when a gateway is switched on.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "field_order": [
+  "is_enabled",
+  "purchase_url",
+  "column_break_1",
+  "link_label",
+  "reference_param",
+  "section_break_help",
+  "help_text"
+ ],
+ "fields": [
+  {
+   "default": "0",
+   "description": "Off until a URL is set and you are ready for customers to see it. The app shows no purchase button while this is off, which is what makes switching it on a deliberate act rather than a side effect of filling in a field.",
+   "fieldname": "is_enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Enabled"
+  },
+  {
+   "description": "Where a customer goes to buy credits: your payment webform, or a page that starts one. The app renders a link to exactly this and does nothing else with it. HTTPS is required -- a payment link served over plain HTTP can be rewritten in transit, and the customer would be paying whoever got there first.",
+   "fieldname": "purchase_url",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Purchase URL",
+   "length": 500
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Buy credits",
+   "description": "What the button says. Left as the default it reads sensibly; change it if your customers know the purchase page by another name.",
+   "fieldname": "link_label",
+   "fieldtype": "Data",
+   "label": "Link Label",
+   "length": 60
+  },
+  {
+   "description": "OPTIONAL, and the difference between a link and a handoff. Set it (for example `ref`) and the app appends the purchase's reference to the URL -- `?ref=AB12-CD34` -- so your webform arrives with the customer already identified and nothing has to be retyped. Leave it blank for a plain link. Without it, one URL cannot say WHICH purchase is being paid, and the reference becomes something a person types, which is how references stop matching.",
+   "fieldname": "reference_param",
+   "fieldtype": "Data",
+   "label": "Reference Parameter",
+   "length": 40
+  },
+  {
+   "fieldname": "section_break_help",
+   "fieldtype": "Section Break",
+   "label": "What The Customer Sees"
+  },
+  {
+   "description": "Shown beside the purchase button, so the customer knows what they are about to do and what they will need afterwards.",
+   "fieldname": "help_text",
+   "fieldtype": "Small Text",
+   "label": "Help Text"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Credits",
+ "name": "Rest Credit Purchase Link",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Rest Integration",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1,
+ "issingle": 1
+}

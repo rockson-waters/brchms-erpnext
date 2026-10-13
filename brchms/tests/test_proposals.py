@@ -674,6 +674,177 @@ class TestFindingTheRightProposal(ProposalTestCase):
 		self.assertIsNone(found["proposal"])
 
 
+class TestPurchaseLink(FrappeTestCase):
+	"""
+	Where a customer goes to buy credits.
+
+	The app renders this URL and does nothing else with it: the gateway, the webform
+	and the settlement all live in ERPNext, which is why switching a gateway on changes
+	nothing about who vouches for money.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		self._restore = frappe.db.get_singles_dict("Rest Credit Purchase Link") or {}
+		frappe.db.delete("Singles", {"doctype": "Rest Credit Purchase Link"})
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.db.delete("Singles", {"doctype": "Rest Credit Purchase Link"})
+		for key, value in self._restore.items():
+			frappe.db.set_single_value("Rest Credit Purchase Link", key, value)
+		frappe.db.commit()
+		super().tearDown()
+
+	def configure(self, **values):
+		doc = frappe.get_single("Rest Credit Purchase Link")
+		for key, value in values.items():
+			doc.set(key, value)
+		doc.flags.ignore_permissions = True
+		doc.save()
+		return doc
+
+	def test_reports_disabled_rather_than_failing_when_nothing_is_set(self):
+		"""
+		"No purchase button" is a decision, not a fault. The app must be able to tell
+		the difference between a link that is switched off and a lookup that broke.
+		"""
+		result = proposals.get_purchase_link()
+
+		self.assertFalse(result["enabled"])
+		self.assertIn("reason", result)
+
+	def test_a_configured_url_is_returned_with_its_label(self):
+		self.configure(
+			is_enabled=1,
+			purchase_url="https://pay.example.test/buy",
+			link_label="Top up credits",
+			help_text="Pay by card or mobile money.",
+		)
+
+		result = proposals.get_purchase_link()
+
+		self.assertTrue(result["enabled"])
+		self.assertEqual(result["url"], "https://pay.example.test/buy")
+		self.assertEqual(result["label"], "Top up credits")
+		self.assertEqual(result["help_text"], "Pay by card or mobile money.")
+		self.assertFalse(result["identifies_purchase"])
+
+	def test_the_reference_is_appended_when_a_parameter_is_set(self):
+		"""
+		The difference between a link and a handoff. Without it the customer carries the
+		reference across by hand -- and a reference that has to be retyped is a reference
+		that stops matching.
+		"""
+		self.configure(
+			is_enabled=1,
+			purchase_url="https://pay.example.test/buy",
+			reference_param="ref",
+		)
+
+		result = proposals.get_purchase_link(purchase_reference="AB12-CD34")
+
+		self.assertEqual(result["url"], "https://pay.example.test/buy?ref=AB12-CD34")
+		self.assertTrue(result["identifies_purchase"])
+		self.assertEqual(result["reference"], "AB12-CD34")
+
+	def test_an_existing_query_string_is_respected(self):
+		# A URL may already carry parameters; a second `?` would break it.
+		self.configure(
+			is_enabled=1,
+			purchase_url="https://pay.example.test/buy?tenant=stjohns",
+			reference_param="ref",
+		)
+
+		result = proposals.get_purchase_link(purchase_reference="AB12-CD34")
+
+		self.assertEqual(result["url"], "https://pay.example.test/buy?tenant=stjohns&ref=AB12-CD34")
+
+	def test_the_reference_is_url_encoded(self):
+		# A reference is data. A character that changes the query string's meaning would
+		# silently send the webform the wrong thing.
+		self.configure(
+			is_enabled=1, purchase_url="https://pay.example.test/buy", reference_param="ref"
+		)
+
+		result = proposals.get_purchase_link(purchase_reference="A B&C=D")
+
+		self.assertIn("A%20B%26C%3DD", result["url"])
+
+	def test_no_parameter_means_no_reference_appended(self):
+		# A plain link is the configured behaviour when no parameter is named, not a bug.
+		self.configure(is_enabled=1, purchase_url="https://pay.example.test/buy")
+
+		result = proposals.get_purchase_link(purchase_reference="AB12-CD34")
+
+		self.assertEqual(result["url"], "https://pay.example.test/buy")
+		self.assertFalse(result["identifies_purchase"])
+
+	def test_an_http_url_is_refused_at_save(self):
+		"""
+		Refused when the operator types it, so they learn immediately rather than a
+		customer discovering it. A payment page over plain HTTP can be rewritten in
+		transit, and the customer would pay whoever got there first.
+		"""
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self.configure(is_enabled=1, purchase_url="http://pay.example.test/buy")
+
+		self.assertIn("https://", str(caught.exception))
+
+	def test_an_http_url_is_refused_at_read_too(self):
+		"""
+		Belt and braces, because the write path is not the only way a value gets in:
+		a console, a data import or a patch can all bypass `validate`. The READ is what
+		a customer's browser follows, so it checks as well.
+
+		Written with `db_set` precisely because that bypasses validation -- which is the
+		circumstance this guard exists for.
+		"""
+		doc = self.configure(is_enabled=1, purchase_url="https://pay.example.test/buy")
+		frappe.db.set_value(
+			"Rest Credit Purchase Link", doc.name, "purchase_url", "http://pay.example.test/buy"
+		)
+		frappe.db.commit()
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			proposals.get_purchase_link()
+
+		self.assertIn("https://", str(caught.exception))
+
+	def test_a_parameter_name_that_is_not_query_syntax_is_refused(self):
+		# `&`, `=` and spaces change what the address means, and the failure is silent:
+		# the customer reaches the right host with the wrong parameters.
+		with self.assertRaises(frappe.ValidationError):
+			self.configure(
+				is_enabled=1,
+				purchase_url="https://pay.example.test/buy",
+				reference_param="a&b",
+			)
+
+	def test_enabling_with_no_url_is_refused_at_save(self):
+		# An enabled link with no destination shows customers a button that goes
+		# nowhere, so it is refused where the operator can see it.
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self.configure(is_enabled=1, purchase_url="")
+
+		self.assertIn("Purchase URL", str(caught.exception))
+
+	def test_the_read_reports_disabled_rather_than_crashing(self):
+		"""
+		The read must survive a state the write path would refuse, because the read is
+		what a customer's page waits on: a lookup that threw would break the credits
+		page rather than simply not offering a button.
+		"""
+		doc = self.configure(is_enabled=0, purchase_url="")
+		frappe.db.set_value("Rest Credit Purchase Link", doc.name, "is_enabled", 1)
+		frappe.db.commit()
+
+		result = proposals.get_purchase_link()
+
+		self.assertFalse(result["enabled"])
+		self.assertIn("reason", result)
+
+
 class TestIntegrationRoleCannotSettle(FrappeTestCase):
 	"""
 	THE BOUNDARY, tested by permission rather than by API shape.

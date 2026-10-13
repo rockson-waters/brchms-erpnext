@@ -46,6 +46,7 @@ operator's list waiting to be paid twice. Both keys exist to make that unreachab
 """
 
 import secrets
+from urllib.parse import quote
 
 import frappe
 from frappe import _
@@ -650,3 +651,74 @@ def ensure_uniqueness_constraint():
 		PROPOSAL_DOCTYPE, ["instance_id", "purchase_reference"], constraint_name=index_name
 	)
 	return True
+
+
+PURCHASE_LINK_DOCTYPE = "Rest Credit Purchase Link"
+
+
+@frappe.whitelist()
+def get_purchase_link(purchase_reference=None):
+	"""
+	Where a customer goes to buy credits, and the customer-facing help text.
+
+	The app renders this and does NOTHING else with it: the gateway, the webform and
+	the settlement all live here, which is why switching a gateway on changes nothing
+	about who vouches for money.
+
+	## Why the reference is appended here rather than by the app
+
+	One URL cannot say WHICH purchase is being paid. If `reference_param` is set, the
+	app is handed a URL that already identifies the purchase -- `?ref=AB12-CD34` -- so
+	the webform arrives pre-filled and nothing is retyped. Without it the customer
+	would have to carry the reference across by hand, and a reference that has to be
+	retyped is a reference that stops matching.
+
+	The appending happens HERE so the rule lives with the URL it applies to. An app
+	that built the query string itself would have to know the parameter name, and two
+	places would then be able to disagree about it.
+
+	Returns `{"enabled": False}` when nothing usable is configured -- which the app
+	must treat as "no purchase button", not as an error. A disabled link is a decision,
+	not a fault.
+	"""
+	settings = frappe.get_single(PURCHASE_LINK_DOCTYPE)
+
+	if not settings.is_enabled:
+		return {"enabled": False, "reason": "the purchase link is switched off"}
+
+	url = cstr(settings.purchase_url).strip()
+	if not url:
+		return {"enabled": False, "reason": "no purchase URL is set"}
+
+	if not url.lower().startswith("https://"):
+		# Refused rather than rendered: a payment page over plain HTTP can be
+		# rewritten in transit, and the customer would pay whoever got there first.
+		frappe.throw(
+			_(
+				"The purchase URL must start with https://. A payment page served over plain HTTP "
+				"can be rewritten in transit, and the customer would be paying whoever got there "
+				"first."
+			),
+			frappe.ValidationError,
+		)
+
+	reference = cstr(purchase_reference).strip()
+	param = cstr(settings.reference_param).strip()
+
+	handoff_url = url
+	if reference and param:
+		separator = "&" if "?" in url else "?"
+		handoff_url = "{0}{1}{2}={3}".format(
+			url, separator, quote(param), quote(reference, safe="")
+		)
+
+	return {
+		"enabled": True,
+		"url": handoff_url,
+		"label": cstr(settings.link_label).strip() or "Buy credits",
+		"help_text": cstr(settings.help_text).strip() or None,
+		# True when the URL carries the purchase, so the app can say the reference is
+		# already attached rather than asking the customer for it again.
+		"identifies_purchase": bool(reference and param),
+		"reference": reference or None,
+	}
