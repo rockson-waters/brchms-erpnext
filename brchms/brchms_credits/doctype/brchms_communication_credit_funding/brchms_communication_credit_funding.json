@@ -91,9 +91,9 @@
    "label": "Money"
   },
   {
-   "description": "Service units granted: SMS segments or email messages. An integer, never a float — the app's ledger is exact and a fractional unit has no meaning.",
+   "description": "Service units granted: SMS segments or email messages. An integer, never a float \u2014 the app's ledger is exact and a fractional unit has no meaning.",
    "fieldname": "units",
-   "fieldtype": "Int",
+   "fieldtype": "Long Int",
    "in_list_view": 1,
    "label": "Units",
    "non_negative": 1,
@@ -102,7 +102,7 @@
   {
    "description": "Money paid, in the currency's MINOR units (cents, pesewas). Integer only: 11250 means 112.50. A float here would round somebody's payment.",
    "fieldname": "amount_minor",
-   "fieldtype": "Int",
+   "fieldtype": "Long Int",
    "label": "Amount (minor units)",
    "non_negative": 1
   },
@@ -115,7 +115,7 @@
   {
    "description": "Price per unit in MILLIONTHS of a major unit, so 0.045 is 45000 exactly. The app's rate card uses the same scale.",
    "fieldname": "unit_price_micros",
-   "fieldtype": "Int",
+   "fieldtype": "Long Int",
    "label": "Unit Price (micros)",
    "non_negative": 1
   },

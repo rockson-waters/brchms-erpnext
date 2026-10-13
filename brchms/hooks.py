@@ -31,7 +31,12 @@ app_publisher = "Breamal"
 app_description = "Funding authority and announcement banner for the BRCHMS church-management system"
 app_email = "no-reply@breamal.com"
 app_license = "mit"
-app_version = "0.1.0"
+
+# Read from the package rather than repeated, so the version Frappe reports and
+# the version in `__init__.py` cannot drift. `frappe.get_attr(app
+# + ".__version__")` is what `bench list-apps` uses; `pyproject.toml` is not
+# consulted at all.
+from brchms import __version__ as app_version  # noqa: E402
 
 # The app has no desk UI of its own: it is an API surface plus two doctypes, and
 # an operator reads them through the standard list views.

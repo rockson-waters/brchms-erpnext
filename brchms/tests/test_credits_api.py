@@ -27,8 +27,45 @@ from brchms.brchms_credits import api
 DOCTYPE = "BRCHMS Communication Credit Funding"
 
 
+def call(method, **kwargs):
+	"""
+	Invoke a WHITELISTED method the way Frappe does.
+
+	`@frappe.whitelist()` does not return the function unchanged: it wraps it with
+	`validate_argument_types` (`frappe/utils/typing_validations.py`), and that
+	wrapper reassigns `kwargs` — it does not forward the caller's. So
+
+	    confirm(**payload)          # ✗ payload silently dropped
+
+	reaches the real function with every argument empty, and `_require_fields`
+	correctly refuses with "Missing required fields: channel, event_id, units."
+	That is a real trap: the test looks like a fixture bug and is actually a
+	calling-convention bug, and it produced a confusing failure until the wrapper
+	was found.
+
+	`frappe.call` is Frappe's supported way to invoke a whitelisted method from
+	server code, and it exercises the same path an HTTP request takes — which is
+	the path under test. Everything in this file goes through here.
+	"""
+	return frappe.call(method, **kwargs)
+
+
+def confirm(**kwargs):
+	return call(api.confirm_funding, **kwargs)
+
+
 def funding_payload(**overrides):
-	"""A valid request, so each test can override exactly the field it is about."""
+	"""
+	A valid request, so each test can override exactly the field it is about.
+
+	The three money fields are CONSISTENT with each other by construction, and
+	that matters: `250 x 450000 micros` is 112,500,000 micros, i.e. 11250 minor
+	units (112.50 CAD at 450 micros per unit = 0.45 per unit). The first version
+	of this fixture paired `units: 250` and `unit_price_micros: 45000` with
+	`amount_minor: 11250` — which is 11.25 CAD, not 112.50 — and the doctype's own
+	money check refused it. The validator caught the test data, which is what it
+	is for; the fixture was wrong, not the rule.
+	"""
 	payload = {
 		"instance_id": "frontend",
 		"event_id": "test:frontend:unit-1",
@@ -39,7 +76,7 @@ def funding_payload(**overrides):
 		"units": "250",
 		"amount_minor": "11250",
 		"currency": "CAD",
-		"unit_price_micros": "45000",
+		"unit_price_micros": "450000",
 	}
 	payload.update(overrides)
 	return payload
@@ -71,38 +108,44 @@ class TestConfirmFunding(FrappeTestCase):
 		once -- which the app would then refuse as a conflict, with the duplicate
 		permanent.
 		"""
-		first = api.confirm_funding(**funding_payload())
-		second = api.confirm_funding(**funding_payload())
+		first = confirm(**funding_payload())
+		second = confirm(**funding_payload())
 
 		self.assertEqual(first["event_id"], second["event_id"])
 		self.assertEqual(first["confirmed_at"], second["confirmed_at"])
 		self.assertEqual(first["units"], second["units"])
 
 		self.assertEqual(
-			api.count_funding(event_id="test:frontend:unit-1"),
+			call(api.count_funding, event_id="test:frontend:unit-1"),
 			1,
 			"a replayed confirmation must not create a second funding record",
 		)
 
 	def test_two_different_events_create_two_rows(self):
 		"""The control for the test above: idempotency must not swallow real work."""
-		api.confirm_funding(**funding_payload(event_id="test:frontend:unit-a"))
-		api.confirm_funding(**funding_payload(event_id="test:frontend:unit-b"))
+		confirm(**funding_payload(event_id="test:frontend:unit-a"))
+		confirm(**funding_payload(event_id="test:frontend:unit-b"))
 
-		self.assertEqual(api.count_funding(event_id="test:frontend:unit-a"), 1)
-		self.assertEqual(api.count_funding(event_id="test:frontend:unit-b"), 1)
+		self.assertEqual(call(api.count_funding, event_id="test:frontend:unit-a"), 1)
+		self.assertEqual(call(api.count_funding, event_id="test:frontend:unit-b"), 1)
 
 	def test_the_unique_index_is_what_rejects_a_duplicate(self):
 		"""
 		Proves the constraint exists rather than trusting the read-first check.
 
-		A direct insert with a duplicate `event_id` must raise. If this passes,
-		the race between two concurrent requests is closed by the database and the
-		`DuplicateEntryError` fallback in the API has something to catch.
-		"""
-		api.confirm_funding(**funding_payload())
+		A direct insert with a duplicate `event_id` — bypassing the API, so the
+		fast path cannot hide the problem — must raise. That is what closes the
+		non-atomic window between the API's read and its insert.
 
-		with self.assertRaises(frappe.exceptions.DuplicateEntryError):
+		Frappe raises `UniqueValidationError` (wrapping the driver's
+		`IntegrityError(1062, "Duplicate entry … for key 'event_id'")`), not the
+		bare `DuplicateEntryError`. Both are caught by `_insert_funding`; this
+		asserts the one that actually arrives, because a test asserting the other
+		one would pass by never running the code path it names.
+		"""
+		confirm(**funding_payload())
+
+		with self.assertRaises(frappe.UniqueValidationError):
 			frappe.get_doc(
 				{
 					"doctype": DOCTYPE,
@@ -110,27 +153,68 @@ class TestConfirmFunding(FrappeTestCase):
 					"event_id": "test:frontend:unit-1",
 					"channel": "sms",
 					"units": 250,
+					"amount_minor": 11250,
+					"unit_price_micros": 450000,
+					"currency": "CAD",
 				}
 			).insert()
+
+	def test_the_API_translates_a_lost_insert_race_instead_of_raising(self):
+		"""
+		The unique index still decides the race; the API must not let the LOSER see
+		a failure.
+
+		When two retries with the same `event_id` both miss the read, one insert
+		wins and the other raises `UniqueValidationError`. Serving that to the
+		client would report an error for an operation that in fact succeeded —
+		and the caller cannot tell that apart from a genuine refusal, on the one
+		path where that distinction decides whether credits are granted twice.
+
+		Simulated here by inserting the row through the ORM, exactly as the winning
+		request would, and then calling the API.
+		"""
+		frappe.get_doc(
+			{
+				"doctype": DOCTYPE,
+				"instance_id": "frontend",
+				"event_id": "test:frontend:unit-1",
+				"channel": "sms",
+				"units": 250,
+				"amount_minor": 11250,
+				"unit_price_micros": 450000,
+				"currency": "CAD",
+			}
+		).insert()
+
+		# The API must answer with the existing event, not an error.
+		response = confirm(**funding_payload())
+
+		self.assertEqual(response["event_id"], "test:frontend:unit-1")
+		self.assertEqual(response["units"], "250")
+		self.assertEqual(
+			call(api.count_funding, event_id="test:frontend:unit-1"),
+			1,
+			"the loser of the race must not have created a second row",
+		)
 
 	# ── Refusals, each by name ───────────────────────────────────────────────
 
 	def test_refuses_a_request_with_no_event_id(self):
 		"""Without the key the record cannot be replayed safely, so it is refused."""
 		with self.assertRaises(frappe.MandatoryError):
-			api.confirm_funding(**funding_payload(event_id=None))
+			confirm(**funding_payload(event_id=None))
 
 	def test_refuses_a_request_with_no_units(self):
 		with self.assertRaises(frappe.MandatoryError):
-			api.confirm_funding(**funding_payload(units=None))
+			confirm(**funding_payload(units=None))
 
 	def test_refuses_zero_units_rather_than_recording_a_payment_that_grants_nothing(self):
 		with self.assertRaises(frappe.ValidationError):
-			api.confirm_funding(**funding_payload(units="0"))
+			confirm(**funding_payload(units="0"))
 
 	def test_refuses_negative_units(self):
 		with self.assertRaises(frappe.ValidationError):
-			api.confirm_funding(**funding_payload(units="-10"))
+			confirm(**funding_payload(units="-10"))
 
 	def test_refuses_a_non_numeric_unit_count(self):
 		"""
@@ -139,29 +223,33 @@ class TestConfirmFunding(FrappeTestCase):
 		record that grants nothing.
 		"""
 		with self.assertRaises(frappe.ValidationError):
-			api.confirm_funding(**funding_payload(units="two hundred"))
+			confirm(**funding_payload(units="two hundred"))
 
 	def test_refuses_a_channel_outside_sms_and_email(self):
 		with self.assertRaises(frappe.ValidationError):
-			api.confirm_funding(**funding_payload(channel="whatsapp"))
+			confirm(**funding_payload(channel="whatsapp"))
 
 	def test_refuses_a_currency_that_is_not_on_the_site(self):
 		with self.assertRaises(frappe.ValidationError):
-			api.confirm_funding(**funding_payload(currency="XXX"))
+			confirm(**funding_payload(currency="XXX"))
 
 	def test_refuses_a_record_whose_money_does_not_add_up(self):
 		"""
-		250 units at 45000 micros is 11250 minor units. Claiming 99999 is paid
+		250 units at 450000 micros is 11250 minor units. Claiming 99999 is paid
 		is the case this check exists for: the authority must not record an amount
 		that contradicts the units it is granting.
+
+		This check caught the first version of `funding_payload`, which paired 250
+		units with 45000 micros and still claimed 11250 minor. The fixture was
+		wrong; the rule was right, and that is the point of asserting it.
 		"""
 		with self.assertRaises(frappe.ValidationError):
-			api.confirm_funding(**funding_payload(amount_minor="99999"))
+			confirm(**funding_payload(amount_minor="99999"))
 
 	# ── The response contract ────────────────────────────────────────────────
 
 	def test_the_response_carries_the_fields_the_app_needs_to_write_a_funding_lot(self):
-		response = api.confirm_funding(**funding_payload())
+		response = confirm(**funding_payload())
 
 		for field in (
 			"event_id",
@@ -179,14 +267,39 @@ class TestConfirmFunding(FrappeTestCase):
 
 	def test_numeric_fields_are_strings_so_a_bigvalue_cannot_lose_precision(self):
 		"""
-		The app parses these as BigInt. A JSON number above 2^53 would arrive
-		rounded, and a rounded unit count is a wrong balance that looks right.
+		The app parses `units` and money as BigInt. A JSON number above 2^53
+		arrives rounded, and a rounded unit count is a wrong balance that looks
+		right.
+
+		`units` here is **2^53 x 10^3**, chosen so the money stays exactly
+		consistent while the unit count is far past what a double can hold:
+
+		    units x price          = 9223372036854770000 micros
+		    amount_minor x 10^4    = 9223372036854770000 micros   ✓ equal
+
+		Worth writing down, because it bounds what this test can cover: a MINOR
+		amount cannot exceed 2^53 at all. `amount x 10^4` must fit an int64, so
+		`amount <= 9.22e14`, and 2^53 is 9.007e15 — an order of magnitude larger.
+		So it is `units` that can break a double here, which is precisely what the
+		doctype's money check used to do: it ran on `flt()`, and
+		`flt(9223372036854770000)` is not that number. The check now uses exact
+		integer arithmetic, and this assertion is what caught it.
 		"""
-		response = api.confirm_funding(**funding_payload(units="9007199254740993"))
+		BIG_UNITS = "9223372036854770000"
+		BIG_AMOUNT = "922337203685477"
+		response = confirm(
+			**funding_payload(units=BIG_UNITS, unit_price_micros="1", amount_minor=BIG_AMOUNT)
+		)
 
 		self.assertIsInstance(response["units"], str)
-		self.assertEqual(response["units"], "9007199254740993")
+		self.assertEqual(response["units"], BIG_UNITS)
 		self.assertNotIn("e+", response["units"].lower())
+		# The round trip is exact, not merely stringly: read it back from the DB.
+		self.assertEqual(str(call(api.count_funding, event_id="test:frontend:unit-1")), "1")
+		stored = frappe.db.get_value(
+			DOCTYPE, {"event_id": "test:frontend:unit-1"}, "units"
+		)
+		self.assertEqual(str(stored), BIG_UNITS)
 
 	def test_the_currency_is_upper_cased_and_the_channel_lower_cased(self):
 		"""
@@ -194,14 +307,14 @@ class TestConfirmFunding(FrappeTestCase):
 		currency itself; normalising here means the two agree by construction
 		rather than by both remembering to.
 		"""
-		response = api.confirm_funding(**funding_payload(currency="cad", channel="SMS"))
+		response = confirm(**funding_payload(currency="cad", channel="SMS"))
 
 		self.assertEqual(response["currency"], "CAD")
 		self.assertEqual(response["channel"], "sms")
 
 	def test_confirmed_at_is_set_by_the_authority_not_the_caller(self):
 		"""A client-supplied timestamp is not evidence of when this system recorded it."""
-		response = api.confirm_funding(**funding_payload())
+		response = confirm(**funding_payload())
 
 		self.assertTrue(response["confirmed_at"])
 
@@ -224,9 +337,9 @@ class TestGetFunding(FrappeTestCase):
 		super().tearDown()
 
 	def test_reads_back_what_was_confirmed(self):
-		api.confirm_funding(**funding_payload())
+		confirm(**funding_payload())
 
-		found = api.get_funding(event_id="test:frontend:unit-1")
+		found = call(api.get_funding, event_id="test:frontend:unit-1")
 		self.assertEqual(found["event_id"], "test:frontend:unit-1")
 		self.assertEqual(found["units"], "250")
 
@@ -235,17 +348,17 @@ class TestGetFunding(FrappeTestCase):
 		`None` rather than an exception: "not recorded" is a legitimate answer,
 		and it is the answer the app's reconciliation asks for.
 		"""
-		self.assertIsNone(api.get_funding(event_id="test:frontend:never"))
+		self.assertIsNone(call(api.get_funding, event_id="test:frontend:never"))
 
 	def test_count_funding_distinguishes_zero_from_one(self):
-		self.assertEqual(api.count_funding(event_id="test:frontend:unit-1"), 0)
+		self.assertEqual(call(api.count_funding, event_id="test:frontend:unit-1"), 0)
 
-		api.confirm_funding(**funding_payload())
-		self.assertEqual(api.count_funding(event_id="test:frontend:unit-1"), 1)
+		confirm(**funding_payload())
+		self.assertEqual(call(api.count_funding, event_id="test:frontend:unit-1"), 1)
 
-		api.confirm_funding(**funding_payload())
+		confirm(**funding_payload())
 		self.assertEqual(
-			api.count_funding(event_id="test:frontend:unit-1"),
+			call(api.count_funding, event_id="test:frontend:unit-1"),
 			1,
 			"the count after a replay is the assertion the app's safety rests on",
 		)

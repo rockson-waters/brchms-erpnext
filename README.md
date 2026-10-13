@@ -30,8 +30,21 @@ Both endpoints are whitelisted methods, so Frappe wraps their return value in
   "units": "250",
   "amount_minor": "11250",
   "currency": "CAD",
-  "unit_price_micros": "45000"
+  "unit_price_micros": "450000"
 }
+```
+
+**The three money fields must agree.** `units × unit_price_micros × 10⁻⁴` must equal
+`amount_minor`, and the doctype refuses the record otherwise.
+
+The exponent is `10⁻⁴`, not `10⁻⁶`, and that is worth stating plainly because it is
+where the first version of this check went wrong. `unit_price_micros` is millionths
+of a **major** unit (10⁶), while `amount_minor` is in **minor** units — cents (10²).
+Converting micros to minor is therefore `10⁶ / 10² = 10⁴`. Using 10⁶ made the rule
+100× too strict and refused every correct record.
+
+The example is consistent: 250 units at 450 000 micros (0.45 each) = 112 500 000
+micros = 11250 minor = 112.50 CAD.
 
 // response
 { "message": {
@@ -144,7 +157,7 @@ curl -s -X POST https://erp.breamal.com/api/method/brchms.brchms_credits.api.con
   -H 'Content-Type: application/json' \
   -d '{"instance_id":"frontend","event_id":"probe-1","purchase_reference":"PROBE-1",
        "organization_id":"1","funding_group_id":"g1","channel":"sms",
-       "units":"10","amount_minor":"450","currency":"CAD","unit_price_micros":"45000"}'
+       "units":"10","amount_minor":"450","currency":"CAD","unit_price_micros":"450000"}'
 
 # Run the identical call again. It must return the SAME event_id and confirmed_at.
 # Then prove it created ONE row, not two:

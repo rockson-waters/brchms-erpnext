@@ -3,7 +3,7 @@
 
 import frappe
 from frappe.model.document import Document
-from frappe.utils import flt, now_datetime
+from frappe.utils import now_datetime
 
 
 class BRCHMSCommunicationCreditFunding(Document):
@@ -91,26 +91,79 @@ class BRCHMSCommunicationCreditFunding(Document):
 		refusing it would make the partial records an operator creates by hand
 		impossible to save.
 
-		The comparison is deliberately exact on integers. `flt(..., 6)` gives the
-		six decimal places the micros scale has, so 250 x 45000 = 11,250,000,000
-		micros equals 11250 minor x 10^6 exactly, and a one-cent discrepancy fails.
+		## The scale, which is where this went wrong first
+
+		Three units meet here and two of them are easy to confuse:
+
+		  * `amount_minor` is money in the currency's MINOR units -- cents. 11250
+		    means 112.50 CAD, so MINOR:MAJOR is 10^2.
+		  * `unit_price_micros` is millionths of a MAJOR unit. 450000 means 0.45
+		    CAD, so MICROS:MAJOR is 10^6.
+		  * `units` is a plain count.
+
+		So the left side (`units x unit_price_micros`) is already in micros, while
+		the right side needs MINOR -> MICROS, which is `10^6 / 10^2 = 10^4`, NOT
+		`10^6`.
+
+		The first version used 10^6 and was therefore 100x too strict: it refused
+		every correct record, including the probe in this app's own README. The
+		live test suite caught it, and this comment is the arithmetic written down
+		so it cannot be re-derived wrongly:
+
+		    250 units x 450000 micros = 112,500,000 micros   (0.45 each -> 112.50)
+		    11250 minor x 10^4        = 112,500,000 micros   ✓ equal
+
+		## And the second thing the same test caught: floats
+
+		This ran on `frappe.utils.flt()`, which converts through a 64-bit double.
+		At 2^53 + 1 that rounds:
+
+		    flt(9007199254740993) -> 9007199254740992
+
+		so the check compared a value the record did not contain and refused a
+		record that is arithmetically exact. That is the very failure this whole
+		app avoids elsewhere — the app stores units and money as bigintegers and
+		parses them as BigInt precisely so large values stay exact — so the
+		validator now does the same: **exact integer arithmetic, no floats
+		anywhere.**
 		"""
 		if self.units is None or self.amount_minor is None or self.unit_price_micros is None:
 			return
 
-		expected_micros = flt(self.amount_minor) * 1_000_000
-		actual_micros = flt(self.units) * flt(self.unit_price_micros)
+		def as_int(value, field):
+			"""Exact int, or a refusal naming the field (never a rounded float)."""
+			try:
+				return int(value)
+			except (TypeError, ValueError):
+				frappe.throw(
+					frappe._("{0} must be a whole number to check the money on this record.").format(
+						frappe.unscrub(field)
+					)
+				)
 
-		if abs(expected_micros - actual_micros) > 0.5:
+		# MINOR -> MICROS: 10^6 micros per major, divided by 10^2 minor per major.
+		MINOR_TO_MICROS = 10_000
+
+		units = as_int(self.units, "units")
+		price = as_int(self.unit_price_micros, "unit_price_micros")
+		amount = as_int(self.amount_minor, "amount_minor")
+
+		actual_micros = units * price
+		expected_micros = amount * MINOR_TO_MICROS
+
+		if actual_micros != expected_micros:
+			# Both sides are reported in MICROS so the reader can see which one is
+			# wrong, rather than being told only that they disagree.
 			frappe.throw(
 				frappe._(
-					"The money does not add up: {0} units at {1} micros per unit is {2} minor "
-					"units, but {3} was recorded as paid. Check the unit price against the "
-					"payment, or record the amount that was actually paid."
+					"The money does not add up: {0} units at {1} micros per unit is {2} micros, "
+					"but the amount recorded ({3} in minor units) is {4} micros. Check the unit "
+					"price against the payment, or record the amount that was actually paid."
 				).format(
 					self.units,
 					self.unit_price_micros,
-					int(actual_micros // 1_000_000),
+					actual_micros,
 					self.amount_minor,
+					expected_micros,
 				)
 			)

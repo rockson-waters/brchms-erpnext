@@ -95,15 +95,60 @@ def confirm_funding(
 	_normalise(payload)
 
 	# ── The idempotent replay ────────────────────────────────────────────────
+	#
+	# The fast path: the event is already recorded, so return it unchanged. This
+	# is the ordinary replay, and it must not create a second row or raise.
 	existing = frappe.db.get_value(DOCTYPE, {"event_id": payload["event_id"]}, "name")
 	if existing:
 		return _as_response(frappe.get_doc(DOCTYPE, existing))
 
+	return _as_response(_insert_funding(payload))
+
+
+def _insert_funding(payload):
+	"""
+	Insert one funding record, treating a duplicate key as a replay.
+
+	## Why this exists rather than a bare `doc.insert()`
+
+	The read above and the insert below are NOT atomic. Two requests carrying the
+	same `event_id` — which is exactly what a retry after a lost response looks
+	like — can both miss the read and both reach `insert()`. The unique index is
+	what decides that race, and without the handling below the loser is served a
+	raw `UniqueValidationError`:
+
+	    frappe.exceptions.UniqueValidationError: ('BRCHMS Communication Credit
+	    Funding', 'cpdr95levf', IntegrityError(1062, "Duplicate entry
+	    'test:frontend:unit-1' for key 'event_id'"))
+
+	Observed on the live site. The caller would see an error for an operation
+	that in fact SUCCEEDED — the funding is recorded, once — and the correct HTTP
+	answer to the retry is the existing event, not a 417. Worse, a `mandatory` or
+	`validation` failure raised here would leave the client unable to tell "it
+	worked, here is the row" from "it failed", on the one call path where that
+	distinction decides whether credits are granted twice.
+
+	So the loser re-reads and returns the winner. The unique index remains the
+	authority; this only stops it surfacing as a failure.
+	"""
 	doc = frappe.get_doc({"doctype": DOCTYPE, **payload})
 	doc.flags.ignore_permissions = False
-	doc.insert()
 
-	return _as_response(doc)
+	try:
+		doc.insert()
+	except (frappe.UniqueValidationError, frappe.exceptions.DuplicateEntryError):
+		# Lost the race: another request inserted this `event_id` first. Return
+		# theirs — it is the same funding event, and the read above proved the
+		# key is what identifies it.
+		winner = frappe.db.get_value(DOCTYPE, {"event_id": payload["event_id"]}, "name")
+		if not winner:
+			# The key is unique and the insert was rejected, so a row must exist.
+			# If it does not, something other than our index refused the insert
+			# and swallowing that would be a lie.
+			raise
+		return frappe.get_doc(DOCTYPE, winner)
+
+	return doc
 
 
 def _require_fields(payload, fields):
