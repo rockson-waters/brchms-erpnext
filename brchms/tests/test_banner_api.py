@@ -42,15 +42,52 @@ def make_banner(**overrides):
 	return doc
 
 
+def suspend_active_banners():
+	"""
+	Switch every currently-active banner off, and return what to restore.
+
+	## Why the tests have to do this
+
+	`get_active_banner` reads the WHOLE table and returns the newest active notice,
+	so a test asserting "nothing is active" is really asserting "the database has no
+	active banner" -- which stops being true the moment somebody authors one. It did:
+	the first real notice created in the Desk ("First banner") broke three tests that
+	had passed only because the table was empty.
+
+	A test that passes only on an empty table is not testing the code; it is testing
+	the fixture. These tests now own the state they depend on.
+	"""
+	names = [
+		row.name
+		for row in frappe.get_all(DOCTYPE, filters={"is_active": 1}, fields=["name"], limit_page_length=0)
+	]
+	for name in names:
+		frappe.db.set_value(DOCTYPE, name, "is_active", 0)
+	if names:
+		frappe.db.commit()
+	return names
+
+
+def restore_active_banners(names):
+	"""Put back exactly what `suspend_active_banners` switched off."""
+	for name in names or []:
+		if frappe.db.exists(DOCTYPE, name):
+			frappe.db.set_value(DOCTYPE, name, "is_active", 1)
+	if names:
+		frappe.db.commit()
+
 class TestGetActiveBanner(FrappeTestCase):
 	def setUp(self):
 		super().setUp()
 		frappe.db.delete(DOCTYPE, {"title": ("like", "Test%")})
 		frappe.db.commit()
+		# Own the state these tests depend on; see `suspend_active_banners`.
+		self.suspended = suspend_active_banners()
 
 	def tearDown(self):
 		frappe.db.delete(DOCTYPE, {"title": ("like", "Test%")})
 		frappe.db.commit()
+		restore_active_banners(self.suspended)
 		super().tearDown()
 
 	# ── Absence is a success ─────────────────────────────────────────────────

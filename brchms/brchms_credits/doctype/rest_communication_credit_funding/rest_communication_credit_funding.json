@@ -13,7 +13,9 @@
   "purchase_reference",
   "column_break_scope",
   "organization_id",
+  "organization_name",
   "funding_group_id",
+  "group_name",
   "channel",
   "section_break_money",
   "units",
@@ -22,6 +24,8 @@
   "unit_price_micros",
   "column_break_link",
   "erpnext_payment_document",
+  "erpnext_payment_doctype",
+  "payment_link",
   "section_break_audit",
   "confirmed_at",
   "notes"
@@ -39,14 +43,14 @@
    "length": 255
   },
   {
-   "description": "The ERPNext site this event belongs to. Rest sends its configured ERPNEXT_INSTANCE_ID and refuses an event that names a different one, because the organization and group ids it uses are per-instance.",
+   "description": "The Rest deployment that confirmed this funding. A Link, not free text: the row is created automatically on first contact, so this resolves to a record carrying the deployment's display name, its activity and an operator's active/inactive decision.",
    "fieldname": "instance_id",
-   "fieldtype": "Data",
+   "fieldtype": "Link",
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Instance ID",
    "reqd": 1,
-   "length": 140
+   "options": "Rest Instance"
   },
   {
    "description": "The payer's invoice or receipt number, as recorded in Rest.",
@@ -69,11 +73,29 @@
    "length": 140
   },
   {
+   "description": "The organization's name as the Rest app knows it. Denormalised on purpose: this record is what an operator scans, and joining elsewhere to find out who paid defeats the point. The id above remains authoritative.",
+   "fieldname": "organization_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Organization",
+   "length": 200,
+   "read_only": 1
+  },
+  {
    "description": "Rest funding-group id: the group that paid and whose balance the units land in.",
    "fieldname": "funding_group_id",
    "fieldtype": "Data",
    "label": "Funding Group ID",
    "length": 140
+  },
+  {
+   "description": "The funding group that paid, by name. Same reasoning as the organization name: readable here, keyed on the id.",
+   "fieldname": "group_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Funding Group",
+   "length": 200,
+   "read_only": 1
   },
   {
    "description": "SMS and email credit are separate balances and are never interchangeable.",
@@ -133,9 +155,17 @@
   {
    "fieldname": "erpnext_payment_doctype",
    "fieldtype": "Link",
-   "hidden": 1,
+   "hidden": 0,
    "label": "Payment Document Type",
-   "options": "DocType"
+   "options": "DocType",
+   "description": "Pick the doctype first (Payment Entry, Sales Invoice, Journal Entry ...), then choose the document. A Dynamic Link needs both halves, which is why this is visible."
+  },
+  {
+   "description": "A clickable link to the payment above, once both halves are set.",
+   "fieldname": "payment_link",
+   "fieldtype": "HTML",
+   "label": "Payment Link",
+   "read_only": 1
   },
   {
    "fieldname": "section_break_audit",

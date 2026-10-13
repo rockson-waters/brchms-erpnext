@@ -42,6 +42,22 @@ from brchms import __version__ as app_version  # noqa: E402
 # an operator reads them through the standard list views.
 required_apps = ["frappe"]
 
+# Desk-side rendering for the funding record: a clickable link to the payment it
+# references, and the sending instance's name and activity beside the id.
+form_render = {
+    "Rest Communication Credit Funding": {
+        "payment_link": "brchms.brchms_credits.form_render.render_funding_extras",
+    },
+}
+
+# The same renderer on print, so a printed funding record carries its payment
+# reference too.
+doc_events = {
+    "Rest Communication Credit Funding": {
+        "before_print": "brchms.brchms_credits.form_render.render_funding_extras",
+    },
+}
+
 # Fixtures ship the two custom roles the app needs on a fresh site. Without them,
 # `install-app` on a new bench produces a site where the integration user cannot
 # be granted anything, and the first API call fails with a permission error that

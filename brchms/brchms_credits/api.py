@@ -72,6 +72,9 @@ def confirm_funding(
 	amount_minor=None,
 	currency=None,
 	unit_price_micros=None,
+	organization_name=None,
+	group_name=None,
+	instance_name=None,
 ):
 	"""
 	Record one confirmed funding event, or return the one already recorded.
@@ -89,7 +92,14 @@ def confirm_funding(
 		"amount_minor": amount_minor,
 		"currency": currency,
 		"unit_price_micros": unit_price_micros,
+		# Labels, not keys. Optional, because a confirmation must never fail for
+		# want of a church name -- the ids are what the money is keyed on.
+		"organization_name": organization_name,
+		"group_name": group_name,
 	}
+	# Deliberately NOT in `payload`: it names the sending INSTANCE, not this
+	# funding record, so putting it here would fail the doctype's field check.
+	instance_display_name = cstr(instance_name).strip() or None
 
 	_require_fields(payload, REQUIRED_FIELDS)
 	_normalise(payload)
@@ -102,10 +112,10 @@ def confirm_funding(
 	if existing:
 		return _as_response(frappe.get_doc(DOCTYPE, existing))
 
-	return _as_response(_insert_funding(payload))
+	return _as_response(_insert_funding(payload, instance_display_name))
 
 
-def _insert_funding(payload):
+def _insert_funding(payload, instance_display_name=None):
 	"""
 	Insert one funding record, treating a duplicate key as a replay.
 
@@ -150,6 +160,15 @@ def _insert_funding(payload):
 	"""
 	# The whitelisted method is the authorisation boundary; see the module
 	# docstring. The integration role stays read-only on the doctype itself.
+	# Register (or refresh) the sending deployment BEFORE the row lands, so the
+	# Link on this record always resolves. Doing it after would leave a funding
+	# record pointing at nothing if the process died in between.
+	payload["instance_id"] = _touch_instance(
+		payload.get("instance_id"),
+		display_name=instance_display_name,
+		erpnext_site=frappe.local.site if hasattr(frappe, "local") else None,
+	)
+
 	doc = frappe.get_doc({"doctype": DOCTYPE, **payload})
 	doc.flags.ignore_permissions = True
 
@@ -215,9 +234,16 @@ def _normalise(payload):
 		"funding_group_id",
 		"channel",
 		"currency",
+		"organization_name",
+		"group_name",
 	):
 		value = payload.get(field)
-		payload[field] = cstr(value).strip() if value not in (None, "") else None
+		text = cstr(value).strip() if value not in (None, "") else None
+		# Capped, because this is remote input rendered in the Desk. A label is a
+		# label; an essay here would be a rendering problem, not a payment.
+		if text and len(text) > 200:
+			text = text[:200]
+		payload[field] = text
 
 	if payload.get("currency"):
 		payload["currency"] = payload["currency"].upper()
@@ -351,3 +377,86 @@ def forget_funding(prefix=TEST_EVENT_PREFIX):
 	frappe.db.commit()
 
 	return {"prefix": prefix, "deleted": deleted, "count": len(deleted)}
+
+
+INSTANCE_DOCTYPE = "Rest Instance"
+
+
+def _touch_instance(instance_id, display_name=None, erpnext_site=None):
+	"""
+	Record that this deployment has been heard from, and return its id.
+
+	Auto-registration, rather than a pre-registration step an operator must
+	remember: a deployment that can pay for credits is a deployment this site
+	should be able to name, and requiring a hand-created row first would make the
+	first real confirmation fail for a bookkeeping reason.
+
+	Idempotent. `first_seen_at` is set once, `last_seen_at` and `confirmed_count`
+	move; `display_name` is only written while it is EMPTY, so an operator's rename
+	in the Desk is never overwritten by the next confirmation.
+	"""
+	instance_id = cstr(instance_id).strip()
+	if not instance_id:
+		# `_require_fields` already guarantees one; belt and braces, because a
+		# Link to "" is worse than a refusal.
+		frappe.throw(_("instance_id is required to record funding."), frappe.MandatoryError)
+
+	names = frappe.get_all(INSTANCE_DOCTYPE, filters={"name": instance_id}, pluck="name")
+
+	if not names:
+		# No explicit `name`: `naming_rule: By fieldname` derives it from
+		# `instance_id`, and setting both invites a mismatch.
+		doc = frappe.get_doc(
+			{
+				"doctype": INSTANCE_DOCTYPE,
+				"instance_id": instance_id,
+				"display_name": display_name or instance_id,
+				"erpnext_site": erpnext_site,
+				"is_active": 1,
+				"first_seen_at": now_datetime(),
+				"last_seen_at": now_datetime(),
+				"confirmed_count": 1,
+			}
+		)
+		try:
+			doc.insert(ignore_permissions=True)
+		except frappe.UniqueValidationError:
+			# Lost a race with a concurrent first contact: the winner created the
+			# row, and this caller's event is a DIFFERENT confirmation, so falling
+			# through to increment is correct -- the count tracks events, not
+			# instances.
+			pass
+		else:
+			return instance_id
+
+	# The increment happens in SQL, not read-then-write.
+	#
+	# Two confirmations can arrive at once, and a read-modify-write would lose one
+	# of them -- the count would end up one short, which is exactly the kind of
+	# quiet disagreement this number exists to catch. `confirmed_count = confirmed_count + 1`
+	# is atomic.
+	set_clause = [
+		"`last_seen_at` = %(last_seen_at)s",
+		"`confirmed_count` = COALESCE(`confirmed_count`, 0) + 1",
+	]
+	if erpnext_site:
+		set_clause.append("`erpnext_site` = %(erpnext_site)s")
+
+	frappe.db.sql(
+		"UPDATE `tab{0}` SET {1} WHERE `name` = %(instance_id)s".format(
+			INSTANCE_DOCTYPE, ", ".join(set_clause)
+		),
+		{"last_seen_at": now_datetime(), "erpnext_site": erpnext_site, "instance_id": instance_id},
+	)
+
+	# An operator's name wins; only fill a blank one.
+	if display_name:
+		frappe.db.sql(
+			"UPDATE `tab{0}` SET `display_name` = %(display_name)s "
+			"WHERE `name` = %(instance_id)s "
+			"AND (`display_name` IS NULL OR `display_name` = '' OR `display_name` = `instance_id`)"
+			.format(INSTANCE_DOCTYPE),
+			{"display_name": display_name, "instance_id": instance_id},
+		)
+
+	return instance_id

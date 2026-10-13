@@ -27,6 +27,32 @@ from brchms.brchms_credits import api
 DOCTYPE = "Rest Communication Credit Funding"
 
 
+INSTANCE = "test:frontend:instance"
+
+
+def ensure_test_instance():
+	"""
+	Register the deployment the funding fixtures name.
+
+	`instance_id` is a Link to `Rest Instance` now, and every funding row must point
+	at a row that exists. `confirm_funding` registers it as a side effect, so tests
+	that go through the API do not need this -- but a test that inserts a funding
+	row directly (the duplicate-key probe, for instance) does, and without it the
+	insert fails with `LinkValidationError: Could not find Instance ID`, which reads
+	like a doctype bug rather than a missing fixture.
+	"""
+	if not frappe.db.exists("Rest Instance", INSTANCE):
+		frappe.get_doc(
+			{
+				"doctype": "Rest Instance",
+				"instance_id": INSTANCE,
+				"display_name": "Test Instance",
+				"is_active": 1,
+			}
+		).insert(ignore_permissions=True)
+	return INSTANCE
+
+
 def call(method, **kwargs):
 	"""
 	Invoke a WHITELISTED method the way Frappe does.
@@ -67,7 +93,7 @@ def funding_payload(**overrides):
 	is for; the fixture was wrong, not the rule.
 	"""
 	payload = {
-		"instance_id": "frontend",
+		"instance_id": INSTANCE,
 		"event_id": "test:frontend:unit-1",
 		"purchase_reference": "TEST-REF-1",
 		"organization_id": "org-unit-1",
@@ -89,10 +115,20 @@ class TestConfirmFunding(FrappeTestCase):
 		# leftover row from an interrupted run would make the next one fail in a
 		# way that looks like a genuine defect.
 		frappe.db.delete(DOCTYPE, {"event_id": ("like", "test:%")})
+		# `instance_id` is a Link to Rest Instance now, so the registration rows
+		# these tests create must go too -- otherwise they accumulate and the
+		# display-name assertions start seeing an instance from an earlier test.
+		frappe.db.delete("Rest Instance", {"name": ("like", "test:%")})
 		frappe.db.commit()
+		# Two tests in this class insert a funding row DIRECTLY (the duplicate-key
+		# probe and the lost-race simulation), so they never go through
+		# `confirm_funding` and never trigger auto-registration. Without this the
+		# insert fails on the `instance_id` Link, which reads like a doctype bug.
+		ensure_test_instance()
 
 	def tearDown(self):
 		frappe.db.delete(DOCTYPE, {"event_id": ("like", "test:%")})
+		frappe.db.delete("Rest Instance", {"name": ("like", "test:%")})
 		frappe.db.commit()
 		super().tearDown()
 
@@ -149,7 +185,7 @@ class TestConfirmFunding(FrappeTestCase):
 			frappe.get_doc(
 				{
 					"doctype": DOCTYPE,
-					"instance_id": "frontend",
+					"instance_id": INSTANCE,
 					"event_id": "test:frontend:unit-1",
 					"channel": "sms",
 					"units": 250,
@@ -176,7 +212,7 @@ class TestConfirmFunding(FrappeTestCase):
 		frappe.get_doc(
 			{
 				"doctype": DOCTYPE,
-				"instance_id": "frontend",
+				"instance_id": INSTANCE,
 				"event_id": "test:frontend:unit-1",
 				"channel": "sms",
 				"units": 250,
@@ -323,6 +359,183 @@ class TestConfirmFunding(FrappeTestCase):
 		# argument back.
 		stored = frappe.db.get_value(DOCTYPE, {"event_id": response["event_id"]}, "confirmed_at")
 		self.assertTrue(stored)
+
+
+class TestInstanceRegistration(FrappeTestCase):
+	"""
+	A deployment is registered automatically, on first contact.
+
+	No pre-registration step, on purpose: a deployment that can pay for credits is
+	a deployment this site should be able to name, and making the first real
+	confirmation fail for a bookkeeping reason would be the wrong trade. The
+	`instance_id` on a funding record is a Link, so the row must exist by the time
+	the funding row lands or the record points at nothing.
+	"""
+
+	INSTANCE = "test:instance-alpha"
+
+	def setUp(self):
+		super().setUp()
+		frappe.db.delete(DOCTYPE, {"event_id": ("like", "test:%")})
+		frappe.db.delete("Rest Instance", {"name": ("like", "test:%")})
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.db.delete(DOCTYPE, {"event_id": ("like", "test:%")})
+		frappe.db.delete("Rest Instance", {"name": ("like", "test:%")})
+		frappe.db.commit()
+		super().tearDown()
+
+	def test_first_confirmation_registers_the_instance_exactly_once(self):
+		confirm(**funding_payload(instance_id=self.INSTANCE, instance_name="St Johns"))
+
+		rows = frappe.get_all("Rest Instance", filters={"name": self.INSTANCE}, fields=["name"])
+		self.assertEqual(len(rows), 1, "first contact must create exactly one instance row")
+
+	def test_a_second_confirmation_does_not_create_another(self):
+		confirm(**funding_payload(instance_id=self.INSTANCE, instance_name="St Johns"))
+		confirm(**funding_payload(instance_id=self.INSTANCE, event_id="test:frontend:unit-2"))
+
+		self.assertEqual(
+			len(frappe.get_all("Rest Instance", filters={"name": self.INSTANCE})),
+			1,
+			"a second confirmation registered a second instance for the same deployment",
+		)
+
+	def test_the_count_reflects_how_many_events_it_confirmed(self):
+		confirm(**funding_payload(instance_id=self.INSTANCE))
+		confirm(**funding_payload(instance_id=self.INSTANCE, event_id="test:frontend:unit-2"))
+
+		self.assertEqual(
+			frappe.db.get_value("Rest Instance", self.INSTANCE, "confirmed_count"),
+			2,
+			"the count is the rough cross-check against the app's own ledger",
+		)
+
+	def test_the_display_name_comes_from_the_instance_name_the_app_sends(self):
+		confirm(**funding_payload(instance_id=self.INSTANCE, instance_name="St Johns"))
+
+		self.assertEqual(
+			frappe.db.get_value("Rest Instance", self.INSTANCE, "display_name"),
+			"St Johns",
+			"an operator should see the church, not an opaque inst_... identifier",
+		)
+
+	def test_an_operators_rename_is_not_overwritten_by_the_next_confirmation(self):
+		"""
+		The display name is a LABEL and an operator may correct it. Only a blank (or
+		still-defaulted) name is filled, so Desk edits survive.
+		"""
+		confirm(**funding_payload(instance_id=self.INSTANCE, instance_name="St Johns"))
+
+		frappe.db.set_value("Rest Instance", self.INSTANCE, "display_name", "Renamed By Operator")
+		confirm(**funding_payload(instance_id=self.INSTANCE, event_id="test:frontend:unit-2", instance_name="St Johns"))
+
+		self.assertEqual(
+			frappe.db.get_value("Rest Instance", self.INSTANCE, "display_name"),
+			"Renamed By Operator",
+			"the confirmation overwrote a name a human had set",
+		)
+
+	def test_names_are_stored_on_the_funding_record(self):
+		confirm(
+			**funding_payload(
+				instance_id=self.INSTANCE,
+				organization_name="The Church of Pentecost",
+				group_name="St Johns",
+			)
+		)
+
+		stored = frappe.db.get_value(
+			DOCTYPE,
+			{"event_id": "test:frontend:unit-1"},
+			["organization_name", "group_name"],
+			as_dict=True,
+		)
+		self.assertEqual(stored.organization_name, "The Church of Pentecost")
+		self.assertEqual(stored.group_name, "St Johns")
+
+	def test_a_confirmation_without_names_still_succeeds(self):
+		"""The ids are what the money is keyed on; a label must never block a payment."""
+		response = confirm(**funding_payload(instance_id=self.INSTANCE))
+
+		self.assertEqual(response["event_id"], "test:frontend:unit-1")
+		self.assertEqual(
+			frappe.db.get_value("Rest Instance", self.INSTANCE, "display_name"),
+			self.INSTANCE,
+			"with no name supplied the instance falls back to its id rather than being blank",
+		)
+
+	def test_an_over_long_name_is_capped_rather_than_stored_whole(self):
+		"""This is remote input rendered in the Desk; a label is a label."""
+		confirm(**funding_payload(instance_id=self.INSTANCE, organization_name="x" * 500))
+
+		stored = frappe.db.get_value(
+			DOCTYPE, {"event_id": "test:frontend:unit-1"}, "organization_name"
+		)
+		self.assertLessEqual(len(stored), 200)
+
+	def test_the_funding_record_links_to_the_instance(self):
+		"""A Link, so the id resolves to a record with a name and an activity trail."""
+		confirm(**funding_payload(instance_id=self.INSTANCE))
+
+		field = frappe.get_meta(DOCTYPE).get_field("instance_id")
+		self.assertEqual(field.fieldtype, "Link")
+		self.assertEqual(field.options, "Rest Instance")
+		self.assertTrue(frappe.db.exists("Rest Instance", self.INSTANCE))
+
+
+class TestFormReachability(FrappeTestCase):
+	"""
+	Every field a human is meant to fill must be reachable from the form.
+
+	This is the class of bug that made the payment link useless: for a while
+	`erpnext_payment_doctype` was `hidden` AND absent from `field_order`, so the
+	Dynamic Link it feeds could never be set -- the visible half was permanently
+	empty and nothing said why. A field that is neither hidden nor read-only but
+	missing from `field_order` does not appear, which is indistinguishable from
+	"the feature does not work".
+	"""
+
+	def test_every_visible_editable_field_reaches_the_form(self):
+		"""
+		`meta.fields` IS the form, in order: Frappe builds it from the doctype's
+		field_order plus every field the JSON defines, and `Meta` exposes no
+		`field_order` of its own (checked on v16 -- the attribute does not exist, so
+		a test reaching for it errors rather than asserting).
+
+		The failure this catches is a field that is neither hidden nor read-only and
+		still does not appear, which is what a field_order omission looks like from
+		the outside -- and what made the payment link permanently unfillable.
+		"""
+		meta = frappe.get_meta(DOCTYPE)
+		on_form = {f.fieldname for f in meta.fields if f.fieldname}
+
+		for required in (
+			"erpnext_payment_document",
+			"erpnext_payment_doctype",
+			"organization_name",
+			"group_name",
+			"instance_id",
+		):
+			self.assertIn(
+				required,
+				on_form,
+				"{0} does not reach the form, so nobody can set it".format(required),
+			)
+
+	def test_the_payment_link_has_both_halves_reachable(self):
+		meta = frappe.get_meta(DOCTYPE)
+		doc_field = meta.get_field("erpnext_payment_document")
+		type_field = meta.get_field("erpnext_payment_doctype")
+
+		self.assertEqual(doc_field.fieldtype, "Dynamic Link")
+		self.assertEqual(type_field.fieldtype, "Link")
+		self.assertFalse(
+			type_field.hidden,
+			"the Dynamic Link's target type must be visible, or the document can never be set",
+		)
+		self.assertIn("erpnext_payment_doctype", {f.fieldname for f in meta.fields})
 
 
 class TestGetFunding(FrappeTestCase):

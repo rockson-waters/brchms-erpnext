@@ -1,0 +1,132 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:instance_id",
+ "creation": "2026-10-13 00:00:00.000000",
+ "description": "One Rest deployment that has sent funding to this ERPNext site. Created automatically the first time an instance confirms a funding event, so the identifier on every funding record resolves to something a person can recognise.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "field_order": [
+  "instance_id",
+  "display_name",
+  "column_break_1",
+  "erpnext_site",
+  "is_active",
+  "section_break_activity",
+  "first_seen_at",
+  "last_seen_at",
+  "confirmed_count",
+  "notes"
+ ],
+ "fields": [
+  {
+   "description": "The deployment's own identifier, minted and stored by the Rest app. It namespaces every funding event (`erpnext:<instance_id>:<purchase id>`) and is the document name, so it is unique by construction. Never edited: changing it would re-key every subsequent confirmation and mint duplicate funding records for payments already recorded.",
+   "fieldname": "instance_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Instance ID",
+   "length": 140,
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "description": "How this deployment reads in a funding list. Filled from the organization's name when the instance first confirms, so it means something straight away; rename it freely, because it is a label and nothing keys on it.",
+   "fieldname": "display_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Display Name",
+   "length": 200
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The ERPNext site that answered the confirmation. Recorded so a funding record can always be traced to the site it landed on.",
+   "fieldname": "erpnext_site",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "ERPNext Site",
+   "length": 140
+  },
+  {
+   "default": "1",
+   "description": "An operator's switch. Turning it off records the decision that this deployment should not be confirming funding; it does NOT invalidate or delete anything already recorded.",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Is Active"
+  },
+  {
+   "fieldname": "section_break_activity",
+   "fieldtype": "Section Break",
+   "label": "Activity"
+  },
+  {
+   "fieldname": "first_seen_at",
+   "fieldtype": "Datetime",
+   "label": "First Seen At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_seen_at",
+   "fieldtype": "Datetime",
+   "label": "Last Seen At",
+   "read_only": 1
+  },
+  {
+   "description": "How many funding events this instance has confirmed. Maintained by the confirmation method, and useful as a rough cross-check against the app's own ledger.",
+   "fieldname": "confirmed_count",
+   "fieldtype": "Int",
+   "label": "Confirmed Count",
+   "read_only": 1
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-13 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Credits",
+ "name": "Rest Instance",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Rest Integration",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
