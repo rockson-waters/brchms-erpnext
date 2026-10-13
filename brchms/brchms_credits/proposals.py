@@ -12,14 +12,28 @@ so the restriction is enforced by Frappe's permission layer rather than by which
 whitelisted methods happen to exist. A leaked integration token can therefore
 create requests and read its own records, and cannot make a single credit real.
 
+## Three identities, and why they are separate
+
+Conflating them is what made the first version unable to serve cash at all.
+
+  * **The claim code** is the proposal's own name (`PROP-00981`). Internal, never
+    shown to customers, and never typed by them. It is what a gateway echoes back in
+    its transaction metadata and what staff read off a receipt.
+  * **The customer's reference** (`purchase_reference`) is whatever the payer already
+    uses -- an invoice number, a bank transfer narration. OPTIONAL, because a cash
+    customer has none to give and a gateway transaction has none until it completes.
+  * **The payment reference** (`payment_reference`) is what the MONEY is identified
+    by: the bank's transaction reference, the gateway's id, or the receipt number
+    issued at the desk. It exists only after payment, so it cannot be asked for
+    before one.
+
 ## Idempotency
 
-`create_proposal` is keyed on `(instance_id, purchase_reference)`. A retry after a
-lost response returns the existing proposal rather than raising a second one, which
-matters because a duplicate proposal is a request for money nobody asked for. The
-reference is the lookup key because it is the same key the operator searches by
-when the payment arrives, so there is exactly one identity in play instead of two
-that can drift.
+`create_proposal` is keyed on `(instance_id, request_key)`, where `request_key` is
+the deployment's own purchase identifier. A retry after a lost response returns the
+existing proposal rather than raising a second one -- a duplicate proposal is a
+request for money nobody asked for, sitting in the operator's list waiting to be
+paid twice.
 """
 
 import frappe
@@ -40,7 +54,7 @@ DEFAULT_EXPIRY_DAYS = 30
 
 REQUIRED_PROPOSAL_FIELDS = (
 	"instance_id",
-	"purchase_reference",
+	"request_key",
 	"organization_id",
 	"funding_group_id",
 	"channel",
@@ -53,6 +67,7 @@ REQUIRED_PROPOSAL_FIELDS = (
 @frappe.whitelist()
 def create_proposal(
 	instance_id=None,
+	request_key=None,
 	purchase_reference=None,
 	organization_id=None,
 	organization_name=None,
@@ -72,9 +87,11 @@ def create_proposal(
 	DRAFT, always. There is no argument that makes this submit -- only a holder of
 	the `submit` permission can do that, and the app's role does not have it.
 	"""
+	request_key = cstr(request_key).strip() or None
+
 	payload = {
 		"instance_id": cstr(instance_id).strip() or None,
-		"purchase_reference": cstr(purchase_reference).strip() or None,
+		"purchase_reference": _cap(cstr(purchase_reference).strip()) or None,
 		"organization_id": cstr(organization_id).strip() or None,
 		"organization_name": _cap(cstr(organization_name).strip()) or None,
 		"funding_group_id": cstr(funding_group_id).strip() or None,
@@ -85,6 +102,9 @@ def create_proposal(
 		"currency": cstr(currency).strip().upper() or None,
 		"unit_price_micros": unit_price_micros,
 		"notes": _cap(cstr(notes).strip(), 2000) or None,
+		# The deployment's own purchase id. Not a user-visible reference: it is the
+		# idempotency key, and it must be stable across the app's retries.
+		"request_key": request_key,
 	}
 
 	_missing = [f for f in REQUIRED_PROPOSAL_FIELDS if payload.get(f) in (None, "")]
@@ -108,7 +128,7 @@ def create_proposal(
 	# also where its display name and activity come from.
 	_touch_instance(payload["instance_id"], display_name=instance_name)
 
-	existing = _find_proposal(payload["instance_id"], payload["purchase_reference"])
+	existing = _find_proposal(payload["instance_id"], request_key)
 	if existing:
 		return _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, existing), created=False)
 
@@ -126,7 +146,7 @@ def create_proposal(
 	except frappe.UniqueValidationError:
 		# Lost a race with a concurrent retry. The winner's proposal is the answer;
 		# raising a second one would be a request for money nobody asked for.
-		winner = _find_proposal(payload["instance_id"], payload["purchase_reference"])
+		winner = _find_proposal(payload["instance_id"], request_key)
 		if winner:
 			return _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, winner), created=False)
 		raise
@@ -135,9 +155,9 @@ def create_proposal(
 
 
 @frappe.whitelist()
-def get_proposal(instance_id=None, purchase_reference=None, proposal=None):
+def get_proposal(instance_id=None, request_key=None, proposal=None):
 	"""
-	One proposal, by reference (the operator's key) or by name.
+	One proposal, by the deployment's request key, or by its code.
 
 	Read-only, and answered as data: `settlement_state` tells the caller whether the
 	money has arrived, which is the only question the app actually has. A missing
@@ -145,7 +165,7 @@ def get_proposal(instance_id=None, purchase_reference=None, proposal=None):
 	"never existed" are different answers and the caller can act on both.
 	"""
 	instance_id = cstr(instance_id).strip()
-	purchase_reference = cstr(purchase_reference).strip()
+	request_key = cstr(request_key).strip()
 	proposal = cstr(proposal).strip()
 
 	if proposal:
@@ -153,7 +173,7 @@ def get_proposal(instance_id=None, purchase_reference=None, proposal=None):
 			return None
 		name = proposal
 	else:
-		name = _find_proposal(instance_id, purchase_reference)
+		name = _find_proposal(instance_id, request_key)
 
 	if not name:
 		return None
@@ -165,6 +185,86 @@ def get_proposal(instance_id=None, purchase_reference=None, proposal=None):
 		return None
 
 	return _proposal_response(doc)
+
+
+@frappe.whitelist()
+def find_pending_proposals(
+	instance_id=None,
+	purchase_reference=None,
+	group_name=None,
+	amount_minor=None,
+	limit=10,
+):
+	"""
+	Find the proposal a payment belongs to, for the operator at the desk.
+
+	## Why a search and not a typed code
+
+	The proposal code is deliberately not shown to customers, so the operator cannot
+	ask for it. What they have is what the customer brings: their own reference (an
+	invoice number, a transfer narration), the group, and the money that actually
+	arrived.
+
+	## Why ambiguity is REPORTED
+
+	Several pending proposals can match -- a group paying the same amount twice, or two
+	groups sharing a reference. Returning the most recent would be right most of the
+	time and silently wrong the rest, settling one request against another's payment.
+	So every candidate is returned with `ambiguous` set, and the operator chooses. The
+	amount that arrived is what usually disambiguates, which is why it is a filter.
+	"""
+	instance_id = cstr(instance_id).strip()
+	if not instance_id:
+		frappe.throw(_("instance_id is required."), frappe.MandatoryError)
+
+	filters = {"instance_id": instance_id, "docstatus": 0}
+
+	if cstr(purchase_reference).strip():
+		filters["purchase_reference"] = cstr(purchase_reference).strip()
+	if cstr(group_name).strip():
+		filters["group_name"] = cstr(group_name).strip()
+	if amount_minor not in (None, ""):
+		filters["amount_minor"] = cint(amount_minor)
+
+	rows = frappe.get_all(
+		PROPOSAL_DOCTYPE,
+		filters=filters,
+		fields=[
+			"name",
+			"purchase_reference",
+			"request_key",
+			"group_name",
+			"channel",
+			"units",
+			"amount_minor",
+			"currency",
+			"creation",
+			"expires_at",
+		],
+		order_by="creation desc",
+		limit_page_length=max(1, min(cint(limit) or 10, 50)),
+	)
+
+	now = now_datetime()
+	candidates = []
+	for row in rows:
+		expired = bool(row.expires_at) and cstr(row.expires_at) < cstr(now)
+		candidates.append(
+			{
+				**row,
+				"expired": expired,
+				# The customer-facing label: what they actually brought with them.
+				"reference_shown": row.purchase_reference or None,
+			}
+		)
+
+	return {
+		"candidates": candidates,
+		"count": len(candidates),
+		# More than one match is the operator's decision, not ours.
+		"ambiguous": len(candidates) > 1,
+		"expired_count": sum(1 for c in candidates if c["expired"]),
+	}
 
 
 @frappe.whitelist()
@@ -198,18 +298,18 @@ def list_pending_proposals(instance_id=None, limit=50):
 
 
 @frappe.whitelist()
-def settlement_state(instance_id=None, purchase_reference=None):
+def settlement_state(instance_id=None, request_key=None):
 	"""
-	Has the money arrived for this reference?
+	Has the money arrived for this request?
 
 	Separate from `get_proposal` because this is the question the app asks on the
-	hot path, and it deserves one word rather than a payload: `draft` (requested,
-	unpaid), `settled` (claimable), `cancelled`, or `unknown` (no such proposal).
+	hot path, and it deserves one word rather than a payload: `draft`, `settled`,
+	`expired`, `cancelled`, or `unknown` (no such proposal).
 	"""
 	instance_id = cstr(instance_id).strip()
-	purchase_reference = cstr(purchase_reference).strip()
+	request_key = cstr(request_key).strip()
 
-	name = _find_proposal(instance_id, purchase_reference)
+	name = _find_proposal(instance_id, request_key)
 	if not name:
 		return {"state": "unknown", "proposal": None}
 
@@ -248,6 +348,8 @@ def _proposal_response(doc, created=None):
 	else:
 		state = "draft"
 
+	awaiting_payment = state == "draft" and bool(cstr(doc.payment_url).strip())
+
 	response = {
 		"proposal": doc.name,
 		"purchase_reference": doc.purchase_reference,
@@ -263,6 +365,13 @@ def _proposal_response(doc, created=None):
 		# The one fact the app acts on. Submitted, and not past its deadline.
 		"claimable": state == "settled",
 		"expired": expired,
+		# Derived, not stored. A payment link exists and nobody has paid yet -- so the
+		# "awaiting payment" state needs no status of its own, and therefore no branch
+		# anywhere else.
+		"awaiting_payment": awaiting_payment,
+		"payment_url": cstr(doc.payment_url) if doc.payment_url else None,
+		"request_key": doc.request_key,
+		"payment_reference": doc.payment_reference,
 		"expires_at": cstr(doc.expires_at) if doc.expires_at else None,
 		"settled_at": cstr(doc.confirmed_at) if doc.confirmed_at else None,
 		"settled_by": doc.settled_by,
@@ -278,14 +387,19 @@ def _proposal_response(doc, created=None):
 	return response
 
 
-def _find_proposal(instance_id, purchase_reference):
-	"""The proposal for one deployment's reference, or None."""
-	if not instance_id or not purchase_reference:
+def _find_proposal(instance_id, request_key):
+	"""
+	The proposal for one deployment's request key, or None.
+
+	Keyed on the REQUEST KEY rather than the customer's reference, because the
+	reference is optional and two purchases may legitimately share one.
+	"""
+	if not instance_id or not request_key:
 		return None
 
 	return frappe.db.get_value(
 		PROPOSAL_DOCTYPE,
-		{"instance_id": instance_id, "purchase_reference": purchase_reference},
+		{"instance_id": instance_id, "request_key": request_key},
 		"name",
 	)
 

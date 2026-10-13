@@ -3,13 +3,15 @@
  "allow_rename": 0,
  "autoname": "format:PROP-{#####}",
  "creation": "2026-10-13 00:00:00.000000",
- "description": "A request to buy service credits, raised by a Rest deployment. DRAFT means requested and unpaid; SUBMITTED means money has been received and the credits are claimable by the app. The draft-to-submitted step is the whole point: only a person, or a payment gateway's own script, can submit, so nothing a tenant application says can make credits real on its own. Reports filtering on docstatus will not count drafts as revenue, which a status field on a single doctype cannot guarantee.",
+ "description": "A request to buy service credits, raised by a Rest deployment. DRAFT means requested and unpaid; SUBMITTED means money has been received and the credits are claimable by the app. The draft-to-submitted step is the whole point: only a person, or a payment gateway's own script, can submit, so nothing a tenant application says can make credits real on its own.",
  "doctype": "DocType",
  "document_type": "Document",
  "engine": "InnoDB",
  "is_submittable": 1,
  "field_order": [
   "purchase_reference",
+  "request_key",
+  "payment_url",
   "instance_id",
   "column_break_scope",
   "organization_id",
@@ -26,6 +28,7 @@
   "section_break_settlement",
   "payment_doctype",
   "payment_document",
+  "payment_reference",
   "payment_link",
   "column_break_audit",
   "confirmed_at",
@@ -40,12 +43,28 @@
    "fieldname": "purchase_reference",
    "fieldtype": "Data",
    "label": "Purchase Reference",
-   "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,
    "length": 140,
-   "description": "The reference the customer quotes when they pay, and how the operator FINDS this proposal. Required: a purchase that cannot be referenced cannot be matched to a payment, so the proposal would be unmatchable rather than merely hard to find.",
+   "description": "The reference the customer already uses for this payment -- an invoice number, or the narration they put on a bank transfer. OPTIONAL, and not the proposal's identity: a cash customer has no reference to give, and a gateway transaction has none until it completes. The operator finds a proposal by this, by the group, by the amount, or by the proposal code read from the customer's receipt.",
    "search_index": 1
+  },
+  {
+   "fieldname": "request_key",
+   "fieldtype": "Data",
+   "label": "Request Key",
+   "length": 140,
+   "read_only": 1,
+   "search_index": 1,
+   "description": "The deployment's own identifier for this purchase. It is the idempotency key: a retried request must resolve to THIS proposal rather than raise a second one, because a duplicate is a request for money nobody asked for. Internal -- never shown to anyone."
+  },
+  {
+   "fieldname": "payment_url",
+   "fieldtype": "Data",
+   "label": "Payment URL",
+   "length": 500,
+   "description": "Set by the deployment when a payment link has been created, so the customer can pay. Its presence on an unsettled proposal IS the 'awaiting payment' state -- derived rather than stored, because every stored status is a branch that has to be handled everywhere, and a derived one is handled where it is read.",
+   "read_only": 1
   },
   {
    "fieldname": "instance_id",
@@ -163,6 +182,15 @@
    "options": "payment_doctype",
    "depends_on": "docstatus==1",
    "description": "The payment this settlement is for. This field turns 'money was received' from a claim into something the books already agree with -- before it existed, nothing anywhere checked that a payment had happened at all."
+  },
+  {
+   "fieldname": "payment_reference",
+   "fieldtype": "Data",
+   "label": "Payment Reference",
+   "length": 200,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "What the payment itself is identified by: the bank's transaction reference, the payment gateway's transaction id, or the receipt number issued at the desk. Required for a settlement made by hand, because it is the only trace of money that arrived without a system vouching for it; optional when a gateway transaction already evidences the payment."
   },
   {
    "fieldname": "payment_link",

@@ -32,12 +32,16 @@ from brchms.brchms_credits import proposals
 PROPOSAL = "Rest Credit Proposal"
 INSTANCE = "test:proposal-instance"
 REFERENCE = "INV-TEST-0001"
+REQUEST_KEY = "test-request-0001"
 INTEGRATION_USER = "restapp@breamal.com"
 
 
 def proposal_payload(**overrides):
 	values = {
 		"instance_id": INSTANCE,
+		# The deployment's own purchase id. This is the idempotency key, and it is what
+		# a retry must resolve to -- not the customer's reference, which is optional.
+		"request_key": REQUEST_KEY,
 		"purchase_reference": REFERENCE,
 		"organization_id": "org-test-1",
 		"organization_name": "Test Church",
@@ -67,6 +71,7 @@ class ProposalTestCase(FrappeTestCase):
 	def _clean(self):
 		"""Exact scope: only what these tests create."""
 		frappe.db.delete(PROPOSAL, {"purchase_reference": ("like", "INV-TEST-%")})
+		frappe.db.delete(PROPOSAL, {"request_key": ("like", "test-request-%")})
 		frappe.db.delete(PROPOSAL, {"instance_id": ("like", "test:%")})
 		frappe.db.delete("Rest Instance", {"name": ("like", "test:%")})
 		for name in frappe.get_all(
@@ -81,13 +86,35 @@ class ProposalTestCase(FrappeTestCase):
 				doc.cancel()
 			frappe.delete_doc("Payment Entry", name, force=True, ignore_permissions=True)
 		for name in frappe.get_all(
-			"Customer", filters={"customer_name": "REST Settlement Probe"}, pluck="name"
+			"Sales Invoice",
+			filters={"customer": ("like", "REST Settlement Probe%")},
+			pluck="name",
+		):
+			invoice = frappe.get_doc("Sales Invoice", name)
+			if invoice.docstatus == 1:
+				invoice.flags.ignore_permissions = True
+				invoice.cancel()
+			frappe.delete_doc("Sales Invoice", name, force=True, ignore_permissions=True)
+		for name in frappe.get_all(
+			"Payment Request",
+			filters={"reference_name": ("like", "REST Settlement Probe%")},
+			pluck="name",
+		):
+			frappe.delete_doc("Payment Request", name, force=True, ignore_permissions=True)
+		for name in frappe.get_all(
+			"Customer", filters={"customer_name": ("like", "REST Settlement Probe%")}, pluck="name"
 		):
 			frappe.delete_doc("Customer", name, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
 	def payment(self):
-		"""One fixture Payment Entry per test, created on demand."""
+		"""
+		One fixture Payment Entry per TEST, created on demand.
+
+		One per test, not per call, and not shared across tests: a settlement links to
+		this document, so it has to outlive every settlement the test makes while
+		teardown removes it before the next test starts.
+		"""
 		if not self.payment_entry:
 			self.payment_entry = make_test_payment_entry()
 		return self.payment_entry
@@ -131,13 +158,34 @@ class TestProposalCreation(ProposalTestCase):
 
 		self.assertNotEqual(first["proposal"], second["proposal"])
 
-	def test_the_reference_is_required(self):
+	def test_a_proposal_can_be_raised_with_no_customer_reference(self):
 		"""
-		Without one the proposal cannot be matched to a payment -- unmatchable rather
-		than merely hard to find, which is why this is mandatory rather than encouraged.
+		The reference is OPTIONAL, and that is a correction rather than a relaxation.
+		A cash customer has no reference to give, and a gateway transaction has none
+		until it completes -- so requiring one made cash purchases impossible and
+		forced a customer to invent a number they would then misremember.
 		"""
+		result = proposals.create_proposal(**proposal_payload(purchase_reference=None))
+
+		self.assertEqual(result["state"], "draft")
+		self.assertIsNone(result["purchase_reference"])
+
+	def test_the_request_key_is_what_makes_a_retry_idempotent(self):
+		"""
+		Not the reference: that is optional and two purchases may share one, so keying on
+		it would merge distinct requests or raise duplicates for one.
+		"""
+		first = proposals.create_proposal(**proposal_payload(purchase_reference=None))
+		second = proposals.create_proposal(**proposal_payload(purchase_reference=None))
+
+		self.assertEqual(first["proposal"], second["proposal"])
+		self.assertEqual(first["request_key"], REQUEST_KEY)
+
+	def test_the_request_key_is_required(self):
+		# Without it there is no key at all, so a retry would raise a second request
+		# for money nobody asked for.
 		with self.assertRaises(frappe.MandatoryError):
-			proposals.create_proposal(**proposal_payload(purchase_reference=None))
+			proposals.create_proposal(**proposal_payload(request_key=None))
 
 	def test_the_expiry_is_stored_so_both_sides_agree_on_the_deadline(self):
 		result = proposals.create_proposal(**proposal_payload())
@@ -173,7 +221,7 @@ class TestProposalIsNotSettledByCreatingIt(ProposalTestCase):
 	def test_settlement_state_is_draft_before_anyone_submits(self):
 		proposals.create_proposal(**proposal_payload())
 
-		state = proposals.settlement_state(instance_id=INSTANCE, purchase_reference=REFERENCE)
+		state = proposals.settlement_state(instance_id=INSTANCE, request_key=REQUEST_KEY)
 
 		self.assertEqual(state["state"], "draft")
 		self.assertFalse(state["proposal"]["claimable"])
@@ -183,12 +231,12 @@ class TestProposalIsNotSettledByCreatingIt(ProposalTestCase):
 		"no such proposal" and "requested but unpaid" are different answers, and the
 		app acts differently on each: one is a bug in the app, the other is patience.
 		"""
-		unknown = proposals.settlement_state(instance_id=INSTANCE, purchase_reference="INV-TEST-NOPE")
+		unknown = proposals.settlement_state(instance_id=INSTANCE, request_key="test-request-nope")
 		self.assertEqual(unknown["state"], "unknown")
 		self.assertIsNone(unknown["proposal"])
 
 		proposals.create_proposal(**proposal_payload())
-		draft = proposals.settlement_state(instance_id=INSTANCE, purchase_reference=REFERENCE)
+		draft = proposals.settlement_state(instance_id=INSTANCE, request_key=REQUEST_KEY)
 		self.assertEqual(draft["state"], "draft")
 
 	def test_an_expired_draft_is_reported_as_expired_and_is_not_claimable(self):
@@ -196,7 +244,7 @@ class TestProposalIsNotSettledByCreatingIt(ProposalTestCase):
 		frappe.db.set_value(PROPOSAL, result["proposal"], "expires_at", add_days(now_datetime(), -1))
 		frappe.db.commit()
 
-		state = proposals.settlement_state(instance_id=INSTANCE, purchase_reference=REFERENCE)
+		state = proposals.settlement_state(instance_id=INSTANCE, request_key=REQUEST_KEY)
 
 		self.assertEqual(state["state"], "expired")
 		self.assertFalse(state["proposal"]["claimable"])
@@ -211,6 +259,7 @@ class TestSettlement(ProposalTestCase):
 		doc.payment_doctype = overrides.pop("payment_doctype", "Payment Entry")
 		doc.payment_document = self.payment()
 		doc.settlement_note = overrides.pop("settlement_note", "Cash received at the desk")
+		doc.payment_reference = overrides.pop("payment_reference", "RECEIPT-TEST-0001")
 		doc.flags.ignore_permissions = True
 		doc.submit()
 		return doc
@@ -218,7 +267,7 @@ class TestSettlement(ProposalTestCase):
 	def test_a_submitted_proposal_is_claimable(self):
 		doc = self.make_submitted()
 
-		state = proposals.settlement_state(instance_id=INSTANCE, purchase_reference=REFERENCE)
+		state = proposals.settlement_state(instance_id=INSTANCE, request_key=REQUEST_KEY)
 
 		self.assertEqual(state["state"], "settled")
 		self.assertTrue(state["proposal"]["claimable"])
@@ -297,10 +346,14 @@ class TestSettlement(ProposalTestCase):
 		doc.payment_doctype = "Payment Entry"
 		doc.payment_document = self.payment()
 		doc.settlement_note = "Transfer cleared late; receipt 4471"
+		# A hand-filed settlement needs the reference the payment carries. This test is
+		# about the EXPIRY rule, but it has to satisfy the reference rule too -- which
+		# is the point of the reference rule: no manual settlement escapes it.
+		doc.payment_reference = "RECEIPT-4471"
 		doc.flags.ignore_permissions = True
 		doc.submit()
 
-		state = proposals.settlement_state(instance_id=INSTANCE, purchase_reference=REFERENCE)
+		state = proposals.settlement_state(instance_id=INSTANCE, request_key=REQUEST_KEY)
 		self.assertEqual(state["state"], "settled")
 
 	def test_cancelling_requires_a_reason(self):
@@ -322,17 +375,25 @@ class TestSettlement(ProposalTestCase):
 		doc.flags.ignore_permissions = True
 		doc.cancel()
 
-		state = proposals.settlement_state(instance_id=INSTANCE, purchase_reference=REFERENCE)
+		state = proposals.settlement_state(instance_id=INSTANCE, request_key=REQUEST_KEY)
 		self.assertEqual(state["state"], "cancelled")
 		self.assertFalse(state["proposal"]["claimable"])
 
 
 class TestPendingList(ProposalTestCase):
 	def test_pending_lists_unsettled_proposals_for_one_deployment_only(self):
-		proposals.create_proposal(**proposal_payload(purchase_reference="INV-TEST-A"))
-		proposals.create_proposal(**proposal_payload(purchase_reference="INV-TEST-B"))
 		proposals.create_proposal(
-			**proposal_payload(purchase_reference="INV-TEST-C", instance_id="test:proposal-other")
+			**proposal_payload(request_key="test-request-a", purchase_reference="INV-TEST-A")
+		)
+		proposals.create_proposal(
+			**proposal_payload(request_key="test-request-b", purchase_reference="INV-TEST-B")
+		)
+		proposals.create_proposal(
+			**proposal_payload(
+				request_key="test-request-c",
+				purchase_reference="INV-TEST-C",
+				instance_id="test:proposal-other",
+			)
 		)
 
 		pending = proposals.list_pending_proposals(instance_id=INSTANCE)
@@ -341,10 +402,14 @@ class TestPendingList(ProposalTestCase):
 		self.assertEqual(references, {"INV-TEST-A", "INV-TEST-B"})
 
 	def test_pending_flags_which_ones_have_expired(self):
-		result = proposals.create_proposal(**proposal_payload(purchase_reference="INV-TEST-OLD"))
+		result = proposals.create_proposal(
+			**proposal_payload(request_key="test-request-old", purchase_reference="INV-TEST-OLD")
+		)
 		frappe.db.set_value(PROPOSAL, result["proposal"], "expires_at", add_days(now_datetime(), -1))
 		frappe.db.commit()
-		proposals.create_proposal(**proposal_payload(purchase_reference="INV-TEST-NEW"))
+		proposals.create_proposal(
+			**proposal_payload(request_key="test-request-new", purchase_reference="INV-TEST-NEW")
+		)
 
 		pending = proposals.list_pending_proposals(instance_id=INSTANCE)
 
@@ -352,6 +417,196 @@ class TestPendingList(ProposalTestCase):
 		self.assertTrue(by_ref["INV-TEST-OLD"]["expired"])
 		self.assertFalse(by_ref["INV-TEST-NEW"]["expired"])
 		self.assertEqual(pending["expired"], 1)
+
+
+class TestTheThreeWaysMoneyArrives(ProposalTestCase):
+	"""
+	Cash, a bank transfer, and a payment gateway leave different traces, and the
+	proposal has to serve all three. The first version served only the middle one.
+
+	  * a GATEWAY supplies its own transaction id, and the linked payment document is
+	    the evidence -- so no hand-entered reference is needed on top;
+	  * a BANK TRANSFER has the bank's reference on the statement;
+	  * CASH has nothing except the receipt issued at the desk.
+
+	For the last two, `payment_reference` is the only trace that money moved.
+	"""
+
+	def _settle(self, **fields):
+		result = proposals.create_proposal(**proposal_payload())
+		doc = frappe.get_doc(PROPOSAL, result["proposal"])
+		doc.payment_doctype = fields.pop("payment_doctype", "Payment Entry")
+		doc.payment_document = self.payment()
+		for key, value in fields.items():
+			doc.set(key, value)
+		doc.flags.ignore_permissions = True
+		doc.submit()
+		return doc
+
+	def test_cash_needs_the_receipt_number_at_the_desk(self):
+		"""Nothing else vouches for a payment taken by hand, so the receipt is it."""
+		doc = self._settle(payment_reference="RECEIPT-4471")
+
+		self.assertEqual(doc.payment_reference, "RECEIPT-4471")
+		self.assertEqual(doc.docstatus, 1)
+
+	def test_cash_without_a_receipt_number_is_refused(self):
+		result = proposals.create_proposal(**proposal_payload())
+		doc = frappe.get_doc(PROPOSAL, result["proposal"])
+		doc.payment_doctype = "Payment Entry"
+		doc.payment_document = self.payment()
+		doc.flags.ignore_permissions = True
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			doc.submit()
+
+		self.assertIn("receipt number", str(caught.exception))
+
+	def test_a_bank_transfer_records_the_banks_own_reference(self):
+		doc = self._settle(payment_reference="GCB-TRF-9920-1145")
+
+		self.assertEqual(doc.payment_reference, "GCB-TRF-9920-1145")
+
+	def test_a_gateway_settlement_needs_no_hand_entered_reference(self):
+		"""
+		A gateway already identifies the transaction and the linked document is the
+		evidence. Demanding a reference on top would be asking an operator to retype
+		something the system already knows -- which is how wrong numbers get in.
+		"""
+		result = proposals.create_proposal(**proposal_payload())
+		doc = frappe.get_doc(PROPOSAL, result["proposal"])
+		doc.payment_doctype = "Payment Request"
+		doc.payment_document = make_test_payment_request()
+		doc.flags.ignore_permissions = True
+		doc.submit()
+
+		self.assertEqual(doc.docstatus, 1)
+		self.assertFalse(doc.payment_reference)
+		self.assertEqual(doc.payment_doctype, "Payment Request")
+
+
+class TestAwaitingPayment(ProposalTestCase):
+	"""
+	`awaiting_payment` is DERIVED from a payment link, not stored as a status.
+
+	Every stored status is a branch that has to be handled everywhere it is read; a
+	derived one is handled in the single place that computes it. The gateway path and
+	the cash path converge on the same transition, which is what makes one field
+	enough.
+	"""
+
+	def test_a_draft_with_a_payment_link_is_awaiting_payment(self):
+		result = proposals.create_proposal(**proposal_payload())
+		frappe.db.set_value(
+			PROPOSAL, result["proposal"], "payment_url", "https://pay.example.test/abc123"
+		)
+		frappe.db.commit()
+
+		state = proposals.settlement_state(instance_id=INSTANCE, request_key=REQUEST_KEY)
+
+		self.assertEqual(state["state"], "draft")
+		self.assertTrue(state["proposal"]["awaiting_payment"])
+		self.assertFalse(state["proposal"]["claimable"])
+		self.assertEqual(
+			state["proposal"]["payment_url"], "https://pay.example.test/abc123"
+		)
+
+	def test_a_draft_with_no_payment_link_is_merely_requested(self):
+		proposals.create_proposal(**proposal_payload())
+
+		state = proposals.settlement_state(instance_id=INSTANCE, request_key=REQUEST_KEY)
+
+		self.assertFalse(state["proposal"]["awaiting_payment"])
+		self.assertIsNone(state["proposal"]["payment_url"])
+
+	def test_the_payment_url_is_not_writable_by_an_ordinary_save(self):
+		"""
+		The app may create the link, but the proposal is not a place a tenant
+		application gets to edit after the fact.
+		"""
+		field = frappe.get_meta(PROPOSAL).get_field("payment_url")
+
+		self.assertTrue(field.read_only)
+
+
+class TestFindingTheRightProposal(ProposalTestCase):
+	"""
+	The operator's search, which is what replaced asking the customer for a code.
+
+	The proposal code is deliberately not shown to customers, so the operator works
+	with what the customer brings: their own reference, the group, and the amount that
+	arrived.
+	"""
+
+	def test_finds_by_the_customers_own_reference(self):
+		proposals.create_proposal(**proposal_payload(purchase_reference="INV-TEST-7777"))
+
+		found = proposals.find_pending_proposals(
+			instance_id=INSTANCE, purchase_reference="INV-TEST-7777"
+		)
+
+		self.assertEqual(found["count"], 1)
+		self.assertFalse(found["ambiguous"])
+		self.assertEqual(found["candidates"][0]["request_key"], REQUEST_KEY)
+
+	def test_finds_a_cash_proposal_that_has_no_reference_at_all(self):
+		"""
+		The case the old design could not serve: a group with no reference. The operator
+		finds it by group and amount instead.
+		"""
+		proposals.create_proposal(
+			**proposal_payload(purchase_reference=None, group_name="Cash Group", amount_minor=10000)
+		)
+
+		found = proposals.find_pending_proposals(
+			instance_id=INSTANCE, group_name="Cash Group", amount_minor=10000
+		)
+
+		self.assertEqual(found["count"], 1)
+		self.assertIsNone(found["candidates"][0]["reference_shown"])
+
+	def test_two_matching_proposals_are_reported_as_ambiguous(self):
+		"""
+		Returning the most recent would be right most of the time and silently wrong the
+		rest, settling one request against another's payment. The operator decides.
+		"""
+		proposals.create_proposal(
+			**proposal_payload(request_key="test-request-a", purchase_reference="INV-TEST-DUP")
+		)
+		proposals.create_proposal(
+			**proposal_payload(request_key="test-request-b", purchase_reference="INV-TEST-DUP")
+		)
+
+		found = proposals.find_pending_proposals(
+			instance_id=INSTANCE, purchase_reference="INV-TEST-DUP"
+		)
+
+		self.assertEqual(found["count"], 2)
+		self.assertTrue(found["ambiguous"])
+
+	def test_a_settled_proposal_is_not_a_candidate(self):
+		"""It has already been paid for; offering it again invites paying twice."""
+		result = proposals.create_proposal(**proposal_payload())
+		doc = frappe.get_doc(PROPOSAL, result["proposal"])
+		doc.payment_doctype = "Payment Entry"
+		doc.payment_document = self.payment()
+		doc.payment_reference = "RECEIPT-9001"
+		doc.flags.ignore_permissions = True
+		doc.submit()
+
+		found = proposals.find_pending_proposals(instance_id=INSTANCE, amount_minor=10000)
+
+		self.assertEqual(found["count"], 0)
+
+	def test_another_deployments_proposals_are_never_candidates(self):
+		"""One tenant must not be able to find, or settle, another's request."""
+		proposals.create_proposal(
+			**proposal_payload(instance_id="test:proposal-other", request_key="test-request-x")
+		)
+
+		found = proposals.find_pending_proposals(instance_id=INSTANCE)
+
+		self.assertEqual(found["count"], 0)
 
 
 class TestIntegrationRoleCannotSettle(FrappeTestCase):
@@ -405,15 +660,91 @@ class TestIntegrationRoleCannotSettle(FrappeTestCase):
 		self.assertNotEqual(perm.submit, 1)
 
 
-def _make_test_customer():
+def make_test_payment_request():
+	"""
+	A Payment Request standing in for a gateway transaction, against a real invoice.
+
+	ERPNext's own model for a gateway payment: it carries `payment_gateway`,
+	`payment_gateway_account` and the `payment_url` the gateway fills in, and a
+	gateway's handler marks it paid. Using it rather than inventing a doctype makes the
+	gateway path a configuration of ERPNext's machinery instead of bespoke code.
+
+	The reference has to be an OUTSTANDING document, not a Customer: ERPNext computes
+	the amount from the reference and refuses with "Payment Entry is already created"
+	when that comes to zero, which is a guard against requesting the same money twice.
+	Pointing at a Customer therefore never works, and the first version of this fixture
+	skipped for that reason while the suite still said OK.
+	"""
+	company = frappe.db.get_value("Company", {}, "name")
+	if not company:
+		raise unittest.SkipTest("no Company exists, so no Payment Request can be made")
+
+	currency = frappe.db.get_value("Company", company, "default_currency") or "GHS"
+	customer = _make_test_customer(suffix=now_datetime().strftime("%H%M%S%f"))
+	income = frappe.db.get_value(
+		"Account", {"company": company, "root_type": "Income", "is_group": 0}, "name"
+	)
+
+	invoice = frappe.get_doc(
+		{
+			"doctype": "Sales Invoice",
+			"company": company,
+			"customer": customer,
+			"posting_date": now_datetime().date(),
+			"due_date": now_datetime().date(),
+			"currency": currency,
+			"items": [
+				{
+					"item_name": "REST gateway probe",
+					"description": "REST gateway probe",
+					"qty": 1,
+					"rate": 100,
+					"income_account": income,
+				}
+			],
+		}
+	)
+	invoice.flags.ignore_permissions = True
+	try:
+		invoice.insert()
+		invoice.submit()
+	except Exception as error:  # noqa: BLE001 - reported as a skip carrying its reason
+		raise unittest.SkipTest("could not create the invoice behind a Payment Request: {0}".format(error))
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "Payment Request",
+			"company": company,
+			"transaction_date": now_datetime().date(),
+			"payment_request_type": "Inward",
+			"currency": currency,
+			"reference_doctype": "Sales Invoice",
+			"reference_name": invoice.name,
+			# Set explicitly: ERPNext's Payment Request does not compute it on insert,
+			# and it is `reqd`, so the first version failed with a bare
+			# "[Payment Request, ACC-PRQ-...]: grand_total".
+			"grand_total": invoice.grand_total,
+			"email_to": "probe@example.test",
+		}
+	)
+	doc.flags.ignore_permissions = True
+	try:
+		doc.insert()
+	except Exception as error:  # noqa: BLE001 - reported as a skip carrying its reason
+		raise unittest.SkipTest("could not create a Payment Request fixture: {0}".format(error))
+	return doc.name
+
+
+def _make_test_customer(suffix=""):
 	"""A Customer to point the payment at, named so teardown can find it."""
+	_name = "REST Settlement Probe" + (" " + suffix if suffix else "")
 	group = frappe.db.get_value("Customer Group", {"is_group": 0}, "name") or "All Customer Groups"
 	territory = frappe.db.get_value("Territory", {"is_group": 0}, "name") or "All Territories"
 
 	doc = frappe.get_doc(
 		{
 			"doctype": "Customer",
-			"customer_name": "REST Settlement Probe",
+			"customer_name": _name,
 			"customer_group": group,
 			"territory": territory,
 		}

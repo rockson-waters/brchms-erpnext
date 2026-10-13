@@ -21,6 +21,10 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint, cstr, now_datetime
 
+# Doctypes whose records already carry a gateway's own transaction identifier, so the
+# proposal does not need a hand-entered reference on top of them.
+GATEWAY_MANAGED_DOCTYPES = {"Payment Request", "Integration Request"}
+
 
 class RestCreditProposal(Document):
 	def validate(self):
@@ -33,11 +37,12 @@ class RestCreditProposal(Document):
 		"""
 		What must be true before this becomes a claim on real credit.
 
-		Both checks exist because submitting is the moment a request stops being
+		These checks exist because submitting is the moment a request stops being
 		aspirational. Everything before it is cheap to get wrong; after it, the app
 		will grant units against this record.
 		"""
 		self._require_evidence_of_payment()
+		self._require_a_trace_for_hand_settled_money()
 		self._require_a_reason_to_settle_an_expired_proposal()
 
 		self.confirmed_at = now_datetime()
@@ -68,15 +73,6 @@ class RestCreditProposal(Document):
 	# ── invariants ──────────────────────────────────────────────────────────────
 
 	def _require_the_essentials(self):
-		if not cstr(self.purchase_reference).strip():
-			frappe.throw(
-				_(
-					"A proposal needs the customer's purchase reference. It is how the operator "
-					"finds this request when the money arrives, so without one the payment cannot be "
-					"matched to it."
-				)
-			)
-
 		if not cstr(self.instance_id).strip():
 			frappe.throw(
 				_(
@@ -209,6 +205,37 @@ class RestCreditProposal(Document):
 				_("{0} {1} does not exist.").format(
 					frappe.utils.escape_html(cstr(self.payment_doctype)),
 					frappe.utils.escape_html(cstr(self.payment_document)),
+				)
+			)
+
+	def _require_a_trace_for_hand_settled_money(self):
+		"""
+		A settlement made by hand needs the reference the payment carries.
+
+		The three ways money arrives are genuinely different, and only one of them
+		leaves a system behind that can vouch for it:
+
+		  * a PAYMENT GATEWAY supplies its own transaction id and the linked payment
+		    document is the evidence, so nothing more is needed here;
+		  * a BANK TRANSFER has the bank's reference on the statement;
+		  * CASH has nothing except the receipt issued at the desk.
+
+		For the last two, this field is the only trace that money moved. Without it a
+		settlement is a claim resting on somebody's memory, and a reconciliation a
+		month later has nothing to match against.
+		"""
+		gateway_managed = cstr(self.payment_doctype).strip() in GATEWAY_MANAGED_DOCTYPES
+
+		if gateway_managed:
+			return
+
+		if not cstr(self.payment_reference).strip():
+			frappe.throw(
+				_(
+					"Record the reference this payment carries before submitting: the bank's "
+					"transaction reference, or the receipt number issued at the desk. It is the only "
+					"trace that money arrived, because nothing else vouches for a payment taken by "
+					"hand."
 				)
 			)
 

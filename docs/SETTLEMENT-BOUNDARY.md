@@ -68,22 +68,70 @@ app reconciles           →  claims the settled proposal, grants credits, once
 never paid               →  the draft expires; nothing was ever claimable
 ```
 
-### Why the reference carries the matching
+### Three identities, which the first design conflated
 
-`purchase_reference` is **required**. The operator finds the proposal by the
-reference the customer quotes when they pay. A proposal with no reference is not
-"hard to find" — it is **unmatchable**, which is why this is mandatory rather than
-encouraged.
+Conflating them is what made the first version unable to serve cash at all.
 
-The app's own `document_id` (a 24-character CUID2 such as
-`u3dc02t5dez6rcprqglrpy7w`) never reaches an operator. It remains what it always
-was: the internal identifier that makes reconciliation idempotent.
+| | What it is | When it exists |
+| --- | --- | --- |
+| **The claim code** | the proposal's own name, `PROP-00981` | at creation |
+| **The customer's reference** | their invoice number, or a bank narration | if they have one |
+| **The payment reference** | the bank's / gateway's / receipt's own number | only **after** payment |
 
-Uniqueness is per **`(instance_id, purchase_reference)`**, not global — two churches
-may legitimately both quote `INV-001`, and collapsing them would settle one church's
-payment against another's. Enforced by the API's idempotent create, which uses the
-same key the operator searches by, so there is one identity in play rather than two
-that can drift.
+The first version made one field carry all three. That fails in both directions: a
+cash customer has no reference to give and cannot invent one reliably, and a gateway
+transaction has none until it completes — so requiring one made cash purchases
+impossible and would have blocked the gateway path too.
+
+**`purchase_reference` is therefore OPTIONAL.** It is a convenience for matching, not
+an identity.
+
+### The claim code is not shown to customers
+
+`PROP-00981` is internal: staff read it off a receipt, and the app passes it as gateway
+transaction metadata where nobody types it. Customers deal only with their own
+reference, or with none.
+
+That decision moves the matching problem to the operator, which is why there is a
+search (`find_pending_proposals`) rather than a code to type: they work with what the
+customer actually brings — their reference, the group, and the money that arrived.
+
+**Ambiguity is reported, not resolved.** Two pending proposals can match, and
+returning the most recent would be right most of the time and silently wrong the rest,
+settling one request against another's payment. So every candidate comes back with
+`ambiguous` set and the operator chooses.
+
+### Idempotency moved to the request key
+
+`create_proposal` is keyed on `(instance_id, request_key)`, where `request_key` is the
+deployment's own purchase id. Keying on the reference would have been wrong once it
+became optional: two purchases may share one, and a missing one would have no key at
+all — so a retry would raise a second request for money nobody asked for.
+
+### The three ways money arrives
+
+`payment_reference` records what the *money* is identified by, and it is required
+**except** for a gateway-managed doctype:
+
+- a **payment gateway** supplies its own transaction id and the linked document is
+  the evidence, so nothing more is needed — demanding a reference on top would ask an
+  operator to retype what the system already knows;
+- a **bank transfer** has the bank's reference on the statement;
+- **cash** has the receipt number issued at the desk.
+
+For the last two it is the only trace that money moved. Without it a settlement rests
+on somebody's memory, and a reconciliation a month later has nothing to match.
+
+### `awaiting_payment` is derived, not stored
+
+A draft with a `payment_url` **is** awaiting payment. No new status: every stored
+status is a branch that has to be handled everywhere it is read, and a derived one is
+handled in the single place that computes it. The gateway path and the cash path
+converge on the same draft→submitted transition, which is what makes one field enough.
+
+The gateway handoff rides ERPNext's own `Payment Request`, which already carries
+`payment_gateway`, `payment_gateway_account` and `payment_url` — so the payment link
+is a configuration of ERPNext's machinery rather than bespoke code.
 
 ### Why a payment document is mandatory to submit
 
@@ -172,6 +220,10 @@ The two that matter most:
   claimable;
 - `test_the_integration_role_cannot_submit` — the role cannot cross the boundary, so
   the API's restraint is backed by a wall rather than a promise.
+
+And for the three ways money arrives: a cash settlement needs its receipt number and
+is refused without one; a bank transfer records the bank's reference; a gateway
+settlement needs no hand-entered reference, and points at a real `Payment Request`.
 
 Also covered: idempotent create by reference; the same reference from two deployments
 staying separate; exact-integer money (never `flt`, which silently rounded a
