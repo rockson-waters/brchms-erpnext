@@ -39,9 +39,10 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import now_datetime
 
-from brchms.brchms_credits import proposals, settlement
+from brchms.brchms_credits import proposals, purchase as purchase_module, settlement
 
 PROPOSAL = "Rest Credit Proposal"
+PURCHASE = "Rest Credit Purchase"
 INVOICE = "Sales Invoice"
 INSTANCE = "test:settlement-instance"
 ITEM_CODE = "REST-SMS-CREDIT"
@@ -389,3 +390,139 @@ class TestSettlement(FrappeTestCase):
 			fields.payment_reference,
 			"the reference must come from the payment document",
 		)
+
+
+class TestPurchaseIntake(FrappeTestCase):
+	"""
+	The public purchase form's server half.
+
+	## What this pins
+
+	The purchase form is the only PUBLIC write in this app, so the two things worth
+	pinning are that it produces the right invoice and that it cannot be used to
+	make credits real. The second is structural — this endpoint raises an invoice,
+	and an invoice only becomes claimable when `settlement` sees it settled, which is
+	a different class of test. What is asserted here is the first: a guest's request
+	becomes a submitted invoice carrying the reference, the channel and the units,
+	billed to a Customer the site did not have before.
+
+	The gateway step is NOT exercised: `make_payment_request` needs a configured
+	Paystack account with real keys, which is a deployment's job. `checkout` is
+	therefore called only as far as the invoice, by calling `_raise_invoice`
+	directly — testing up to the boundary of what this app owns.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		self._clean()
+
+	def tearDown(self):
+		self._clean()
+		super().tearDown()
+
+	def _clean(self):
+		for name in frappe.get_all(
+			PURCHASE, filters={"buyer_email": ("like", "intake-test-%")}, pluck="name"
+		):
+			frappe.delete_doc(PURCHASE, name, force=True, ignore_permissions=True)
+
+		for name in frappe.get_all(
+			INVOICE, filters={"customer": ("like", "Intake Test Buyer%")}, pluck="name"
+		):
+			doc = frappe.get_doc(INVOICE, name)
+			if doc.docstatus == 1:
+				doc.flags.ignore_permissions = True
+				doc.cancel()
+			frappe.delete_doc(INVOICE, name, force=True, ignore_permissions=True)
+
+		for name in frappe.get_all(
+			"Customer", filters={"customer_name": ("like", "Intake Test Buyer%")}, pluck="name"
+		):
+			frappe.delete_doc("Customer", name, force=True, ignore_permissions=True)
+
+	def _request(self, **overrides):
+		values = {
+			"doctype": PURCHASE,
+			"buyer_name": "Intake Test Buyer",
+			"buyer_email": "intake-test-{0}@example.test".format(
+				now_datetime().strftime("%H%M%S%f")
+			),
+			"channel": "sms",
+			"units": 250,
+			"amount": 25,
+			"purchase_reference": "INTAKE-REF-1",
+		}
+		values.update(overrides)
+		doc = frappe.get_doc(values)
+		doc.flags.ignore_permissions = True
+		doc.insert()
+		return doc
+
+	def test_a_guest_request_becomes_a_submitted_invoice(self):
+		"""The invoice is real, attributable and carries what was ordered."""
+		purchase = self._request()
+		invoice_name = purchase_module._raise_invoice(purchase)
+		invoice = frappe.get_doc(INVOICE, invoice_name)
+
+		self.assertEqual(1, invoice.docstatus, "the invoice must be submitted to be payable")
+		self.assertEqual("INTAKE-REF-1", invoice.purchase_reference)
+		self.assertEqual("sms", invoice.channel)
+		self.assertEqual(250, invoice.units)
+		self.assertEqual(25, invoice.grand_total)
+		self.assertEqual("REST-SMS-CREDIT", invoice.items[0].item_code)
+
+	def test_the_channel_decides_the_item_not_the_buyer(self):
+		"""Email credits bill the email item; the buyer never names an item."""
+		purchase = self._request(channel="email", units=100, amount=10)
+		invoice_name = purchase_module._raise_invoice(purchase)
+		invoice = frappe.get_doc(INVOICE, invoice_name)
+
+		self.assertEqual("REST-EMAIL-CREDIT", invoice.items[0].item_code)
+
+	def test_one_buyer_email_is_one_customer(self):
+		"""
+		A repeat buyer does not become two customers.
+
+		Two Customer records for one address would split the purchase history an
+		operator reconciles payments against, which is the whole reason this mapping
+		is by email rather than by name.
+		"""
+		email = "intake-test-repeat@example.test"
+		first = self._request(buyer_email=email)
+		second = self._request(buyer_email=email, purchase_reference="INTAKE-REF-2")
+
+		first_invoice = frappe.get_doc(INVOICE, purchase_module._raise_invoice(first))
+		second_invoice = frappe.get_doc(INVOICE, purchase_module._raise_invoice(second))
+
+		self.assertEqual(
+			first_invoice.customer,
+			second_invoice.customer,
+			"the same email produced two Customer records",
+		)
+
+	def test_an_impossible_order_is_refused_with_readable_advice(self):
+		"""
+		Zero units, zero money, a bad address and no channel are all refused.
+
+		The assertion is on the WORDS A BUYER READS, not on schema field names.
+		`docs/ERROR-MESSAGE-STANDARD.md` is normative here: a rejection says which
+		input is wrong and what a valid value looks like, in human labels. A first
+		version of this test asserted the fieldname `units` and failed against a
+		message that said "how many credits you are buying" — which is the standard
+		working, and the test being wrong.
+		"""
+		cases = (
+			({"units": 0}, "how many credits"),
+			({"amount": 0}, "amount you are paying"),
+			({"buyer_email": "not-an-address"}, "valid email address"),
+			({"channel": ""}, "which kind of credit"),
+		)
+		for overrides, expected in cases:
+			with self.assertRaises(frappe.ValidationError) as caught:
+				self._request(**overrides)
+			message = str(caught.exception).lower()
+			self.assertIn(
+				expected,
+				message,
+				"the refusal for {0} should say what to do, in the buyer's words".format(overrides),
+			)

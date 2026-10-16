@@ -30,6 +30,7 @@ import frappe
 from frappe import _
 
 INVOICE_DOCTYPE = "Sales Invoice"
+PURCHASE_DOCTYPE = "Rest Credit Purchase"
 PURCHASE_REFERENCE_FIELD = "purchase_reference"
 
 # The channel names the app sends. Kept as data so the item code, the label and the
@@ -54,12 +55,76 @@ STOCK_UOM = "Nos"
 def after_migrate():
 	"""Hook body for `bench migrate`. Each step is independent and idempotent."""
 	created = []
-	if ensure_purchase_reference_field():
-		created.append("Sales Invoice.purchase_reference")
+	for fieldname in ensure_purchase_input_fields():
+		created.append("Sales Invoice.{0}".format(fieldname))
 	if ensure_purchase_reference_index():
 		created.append("index on purchase_reference")
 	created.extend(ensure_credit_items())
+	created.extend(ensure_purchase_web_form())
 
+	return created
+
+
+# What the purchase form collects about the REQUEST, per channel. Kept as data so
+# the fields, the web form and the app's own vocabulary cannot drift.
+PURCHASE_INPUT_FIELDS = (
+	{
+		"fieldname": "channel",
+		"label": "Channel",
+		"fieldtype": "Select",
+		"options": "sms\nemail",
+		"insert_after": "purchase_reference",
+		"description": (
+			"Which communications channel these credits buy: `sms` or `email`. Stored so "
+			"the settlement can be checked against the channel's rate rather than guessed "
+			"from the amount."
+		),
+	},
+	{
+		"fieldname": "units",
+		"label": "Units",
+		"fieldtype": "Int",
+		"insert_after": "channel",
+		"description": (
+			"How many SMS segments or emails the buyer is paying for. The app's own quote "
+			"records what it expected; a settlement carrying a different number is a query, "
+			"not a silence."
+		),
+	},
+)
+
+
+def ensure_purchase_input_fields():
+	"""
+	Create the Sales Invoice fields the purchase form collects.
+
+	`purchase_reference` is created first because the others are positioned relative
+	to it — in a different order they would attach somewhere arbitrary in the form.
+	"""
+	created = []
+	ensure_purchase_reference_field()
+
+	from frappe.custom.doctype.custom_field.custom_field import create_custom_field
+
+	for spec in PURCHASE_INPUT_FIELDS:
+		if frappe.db.has_column(INVOICE_DOCTYPE, spec["fieldname"]):
+			continue
+		create_custom_field(
+			INVOICE_DOCTYPE,
+			{
+				"fieldname": spec["fieldname"],
+				"label": spec["label"],
+				"fieldtype": spec["fieldtype"],
+				"options": spec.get("options", ""),
+				"insert_after": spec["insert_after"],
+				"description": spec["description"],
+			},
+		)
+		created.append(spec["fieldname"])
+
+	if created:
+		frappe.clear_cache(doctype=INVOICE_DOCTYPE)
+		frappe.logger().info("brchms: created Sales Invoice fields %s", created)
 	return created
 
 
@@ -207,3 +272,146 @@ def _fallback_uom():
 	doc.flags.ignore_permissions = True
 	doc.insert()
 	return doc.name
+
+
+# ── the purchase form ────────────────────────────────────────────────────────
+
+WEB_FORM_NAME = "Rest Credit Purchase"
+WEB_FORM_ROUTE = "buy-credits"
+
+# The fields the customer fills in, which must match `Rest Credit Purchase`
+# EXACTLY. Frappe's `WebForm.validate_fields` refuses a field that does not exist
+# on the target doctype, and that refusal is the reason this form is not backed by
+# Sales Invoice: an invoice stores its line item in a child table and has no email
+# field, so the three things a buyer must give — what, how many, and where the
+# receipt goes — cannot live on it.
+WEB_FORM_FIELDS = (
+	{
+		"fieldname": "buyer_name",
+		"label": "Your Name",
+		"fieldtype": "Data",
+		"reqd": 1,
+		"description": "The name this purchase is billed to.",
+	},
+	{
+		"fieldname": "buyer_email",
+		"label": "Your Email Address",
+		"fieldtype": "Data",
+		"options": "Email",
+		"reqd": 1,
+		"description": "Where the receipt goes. Used to reach you about this purchase.",
+	},
+	{
+		"fieldname": "channel",
+		"label": "Credit Type",
+		"fieldtype": "Select",
+		"options": "sms\nemail",
+		"reqd": 1,
+		"description": "SMS credits are counted in segments; email credits in messages.",
+	},
+	{
+		"fieldname": "units",
+		"label": "How Many Credits",
+		"fieldtype": "Int",
+		"reqd": 1,
+	},
+	{
+		"fieldname": "amount",
+		"label": "Amount You Are Paying",
+		"fieldtype": "Currency",
+		"reqd": 1,
+		"description": "The amount to be invoiced. You will be shown the payment page next.",
+	},
+)
+
+# Set on the page: the request is created first, then the invoice and the payment
+# page are asked for in ONE call whose answer is a URL. Doing it here rather than
+# with `success_url` is what makes the destination dynamic — a static URL could not
+# name the purchase being paid for.
+WEB_FORM_CLIENT_SCRIPT = """
+frappe.ready(function () {
+\tfrappe.web_form.after_save = function () {
+\t\tfrappe.call({
+\t\t\tmethod: "brchms.brchms_credits.purchase.checkout",
+\t\t\ttype: "POST",
+\t\t\targs: { purchase: frappe.web_form.doc.name },
+\t\t\tcallback: function (r) {
+\t\t\t\tvar url = r && r.message && r.message.payment_url;
+\t\t\t\tif (url) {
+\t\t\t\t\tfrappe.web_form.success_message =
+\t\t\t\t\t\t"Purchase recorded. Taking you to the payment page...";
+\t\t\t\t\twindow.location.replace(url);
+\t\t\t\t} else {
+\t\t\t\t\tfrappe.msgprint(
+\t\t\t\t\t\t__("Your purchase was recorded, but the payment page could not be opened. " +
+\t\t\t\t\t\t   "Please contact us and quote " + frappe.web_form.doc.name + ".")
+\t\t\t\t\t);
+\t\t\t\t}
+\t\t\t},
+\t\t});
+\t};
+});
+"""
+
+
+def ensure_purchase_web_form():
+	"""
+	Create or update the customer-facing purchase form.
+
+	## Why it is created here and not by hand in the Desk
+
+	A Web Form made in the Desk lives only in that site's database, so a fresh
+	deployment would not have it and an operator could not tell a site that never had
+	one from a site whose form was deleted. Creating it on migrate means the purchase
+	page arrives the same way every other thing this app needs does.
+
+	## Why the fields are listed rather than scanned from the doctype
+
+	`WebFormField` rows are what the rendered page reads. A scanned list would expose
+	every custom field a site happens to have — including ones that are not a
+	customer's business. The list is this module's data, so what the form asks for is
+	reviewable in one place, and `validate_fields` checks it against the doctype on
+	save.
+	"""
+	if not frappe.db.exists("DocType", "Web Form"):
+		return []
+
+	existing = frappe.db.get_value("Web Form", {"route": WEB_FORM_ROUTE}, "name")
+	doc = frappe.get_doc("Web Form", existing) if existing else frappe.get_doc({"doctype": "Web Form"})
+
+	doc.update(
+		{
+			"title": WEB_FORM_NAME,
+			"route": WEB_FORM_ROUTE,
+			"doc_type": PURCHASE_DOCTYPE,
+			"is_standard": 0,
+			"published": 1,
+			# A buyer is a stranger with no account here. `login_required` with
+			# `anonymous` is how Frappe expresses that: the form is public and the
+			# record is created as Guest, which is why `checkout` is the only public
+			# write and it raises the invoice itself.
+			"login_required": 0,
+			"anonymous": 1,
+			"allow_multiple": 1,
+			"allow_edit": 0,
+			"allow_delete": 0,
+			"show_list": 0,
+			"button_label": "Continue to Payment",
+			"success_title": "Purchase recorded",
+			"success_message": "Taking you to the payment page...",
+			"client_script": WEB_FORM_CLIENT_SCRIPT,
+		}
+	)
+
+	doc.web_form_fields = []
+	for spec in WEB_FORM_FIELDS:
+		doc.append("web_form_fields", spec)
+
+	doc.flags.ignore_permissions = True
+	doc.save()
+
+	frappe.db.commit()
+	frappe.clear_cache()
+	frappe.logger().info("brchms: purchase web form at /%s", WEB_FORM_ROUTE)
+	return ["web form /{0}".format(WEB_FORM_ROUTE)]
+

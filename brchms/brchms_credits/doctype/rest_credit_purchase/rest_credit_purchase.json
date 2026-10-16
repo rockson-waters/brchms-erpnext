@@ -1,0 +1,171 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "format:RCP-{#####}",
+ "creation": "2026-10-17 00:00:00.000000",
+ "description": "What a customer asked to buy, captured by the public purchase form before any money moves. It exists so the Web Form has an honest target: a form cannot collect an item, a quantity and an email address onto a Sales Invoice, whose items are a child table and which has no email field, and pretending otherwise produces a form that saves nothing. The Sales Invoice is raised FROM this record, server-side, so the buyer never chooses the item, the rate or the accounts.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "field_order": [
+  "status",
+  "column_break_1",
+  "invoice",
+  "purchase_reference",
+  "section_break_buyer",
+  "buyer_name",
+  "buyer_email",
+  "section_break_order",
+  "channel",
+  "units",
+  "amount",
+  "section_break_payment",
+  "payment_url",
+  "notes"
+ ],
+ "fields": [
+  {
+   "default": "Requested",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Requested\nInvoiced\nPaid\nAbandoned",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The Sales Invoice raised for this request. Created by the server, never by the form, so the item, the rate, the company and the accounts are all the deployment's choice.",
+   "fieldname": "invoice",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Sales Invoice",
+   "options": "Sales Invoice",
+   "read_only": 1
+  },
+  {
+   "description": "The Rest purchase reference, carried through to the invoice so a payment can be matched back to the deployment that asked for it.",
+   "fieldname": "purchase_reference",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Purchase Reference",
+   "length": 140
+  },
+  {
+   "fieldname": "section_break_buyer",
+   "fieldtype": "Section Break",
+   "label": "Buyer"
+  },
+  {
+   "fieldname": "buyer_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Buyer Name",
+   "length": 140,
+   "reqd": 1
+  },
+  {
+   "description": "Where the receipt goes, and how the buyer can be reached about this purchase.",
+   "fieldname": "buyer_email",
+   "fieldtype": "Data",
+   "label": "Buyer Email",
+   "length": 140,
+   "options": "Email",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_order",
+   "fieldtype": "Section Break",
+   "label": "What Is Being Bought"
+  },
+  {
+   "fieldname": "channel",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Channel",
+   "options": "sms\nemail",
+   "reqd": 1
+  },
+  {
+   "description": "Segments for SMS, messages for email.",
+   "fieldname": "units",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Units",
+   "reqd": 1
+  },
+  {
+   "description": "What the buyer is paying. The invoice is raised for THIS amount rather than recomputed, so the price a customer agreed to is the price on the invoice.",
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Amount",
+   "options": "currency",
+   "reqd": 1
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "label": "Currency",
+   "options": "Currency"
+  },
+  {
+   "fieldname": "section_break_payment",
+   "fieldtype": "Section Break",
+   "label": "Payment"
+  },
+  {
+   "description": "Where this buyer was sent to pay. Recorded because a buyer who reached the gateway and one who never left the form need different follow-up.",
+   "fieldname": "payment_url",
+   "fieldtype": "Data",
+   "label": "Payment URL",
+   "length": 500,
+   "read_only": 1
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-17 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Credits",
+ "name": "Rest Credit Purchase",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Rest Integration",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
