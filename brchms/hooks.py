@@ -63,6 +63,14 @@ doc_events = {
     "Rest Credit Proposal": {
         "before_print": "brchms.brchms_credits.form_render.render_proposal_extras",
     },
+    # Settlement. Every route to being paid — a gateway's own entry, or an operator
+    # entering cash or a bank transfer by hand — ends as a submitted Payment Entry
+    # referencing the Sales Invoice, so one hook here covers all of them and no
+    # per-gateway code exists (or needs to). See brchms_credits/settlement.py for
+    # why this may never raise into the payment.
+    "Payment Entry": {
+        "on_submit": "brchms.brchms_credits.settlement.settle_for_payment_entry",
+    },
 }
 
 # Fixtures ship the two custom roles the app needs on a fresh site. Without them,
@@ -86,4 +94,11 @@ fixtures = [
 # only for a field used as the document NAME -- so leaving this to the doctype's
 # `unique: 1` flag would have produced no constraint at all, and two proposals could
 # share the reference the operator matches payments by.
-after_migrate = ["brchms.brchms_credits.proposals.after_migrate"]
+after_migrate = [
+    "brchms.brchms_credits.proposals.after_migrate",
+    # The purchase flow's install-time records: the `purchase_reference` field and
+    # index on Sales Invoice, and the items being sold. Idempotent, and deliberately
+    # a hook rather than a `fixtures/` entry — fixtures are only imported when an
+    # operator asks, and the failure of a missing field surfaces on a live site.
+    "brchms.brchms_credits.provisioning.after_migrate",
+]

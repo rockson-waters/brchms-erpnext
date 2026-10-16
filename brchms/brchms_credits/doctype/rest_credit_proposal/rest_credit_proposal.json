@@ -175,7 +175,7 @@
    "label": "Payment Document Type",
    "options": "DocType",
    "depends_on": "docstatus==1",
-   "description": "Pick the doctype first (Payment Entry, Sales Invoice, Journal Entry...), then the document. A Dynamic Link needs both halves, which is why it is visible."
+   "description": "What kind of document records the payment: \"Payment Entry\" for the ordinary case, or a gateway-managed doctype. It must be a real Frappe document type, because submitting is the moment this becomes a claim on real credit and the document IS the evidence — see _require_evidence_of_payment."
   },
   {
    "fieldname": "payment_document",
@@ -183,7 +183,7 @@
    "label": "Payment Document",
    "options": "payment_doctype",
    "depends_on": "docstatus==1",
-   "description": "The payment this settlement is for. This field turns 'money was received' from a claim into something the books already agree with -- before it existed, nothing anywhere checked that a payment had happened at all."
+   "description": "The document that settled this proposal, in the type named above. The doctype pair is checked for existence at submit, so a settlement cannot claim a payment that is not on the books."
   },
   {
    "fieldname": "payment_reference",

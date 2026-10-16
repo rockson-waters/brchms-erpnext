@@ -401,6 +401,106 @@ def settlement_state(instance_id=None, request_key=None):
 	return {"state": state, "proposal": _proposal_response(doc)}
 
 
+@frappe.whitelist()
+def settle_proposal(proposal=None, purchase_reference=None, payment_doctype=None,
+                    payment_document=None, payment_reference=None, note=None):
+	"""
+	Settle a proposal against a payment document that exists on the books.
+
+	## Why a REAL document is required, and not free text
+
+	`Rest Credit Proposal._require_evidence_of_payment` states the rule and this
+	follows it rather than working around it: submitting is the moment a request
+	becomes a claim on real credit, so the thing that vouches for the money must
+	exist in the system. The three ways money arrives all end as a document here —
+	a gateway writes a Payment Request / Integration Request, and an operator taking
+	cash or a bank transfer writes a **Payment Entry** (which is also what settles
+	the invoice, so the automatic hook covers that case without this method).
+
+	So an attempt to settle against "Bank Transfer", "Cash" or any other free text
+	is refused, and the message says what to do instead.
+
+	## When this is needed at all
+
+	The ordinary path is a submitted Payment Entry, settled automatically by
+	`brchms_credits.settlement`. This is for a payment whose document exists but
+	whose invoice did not carry a `purchase_reference` — or a settlement the hook
+	logged and deliberately did not complete.
+	"""
+	from brchms.brchms_credits import settlement as settlement_module
+
+	name = cstr(proposal).strip()
+	if not name and cstr(purchase_reference).strip():
+		name = frappe.db.get_value(
+			PROPOSAL_DOCTYPE, {"purchase_reference": cstr(purchase_reference).strip()}, "name"
+		) or ""
+	if not name:
+		frappe.throw(
+			_("Name the proposal, or give the purchase reference of one that exists."),
+			frappe.DoesNotExistError,
+		)
+
+	doctype = cstr(payment_doctype).strip()
+	document = cstr(payment_document).strip()
+	if not doctype or not document:
+		frappe.throw(
+			_(
+				"Name the payment document that settled this: its type and its name. A settlement "
+				"has to point at a record on the books, because that record is the evidence money "
+				"arrived. For cash or a bank transfer, enter the Payment Entry first and name it here."
+			),
+			frappe.MandatoryError,
+		)
+
+	if not frappe.db.exists("DocType", doctype):
+		frappe.throw(
+			_(
+				"'{0}' is not a document type in this system. Cash and bank transfers are recorded "
+				"as a Payment Entry — create that first, then settle against it."
+			).format(frappe.utils.escape_html(doctype)),
+			frappe.ValidationError,
+		)
+
+	# The real document, loaded — not a stand-in. Its own reference number is what a
+	# reviewer will match against a bank statement, so it is read from the document
+	# rather than taken on the caller's word.
+	payment = frappe.get_doc(doctype, document)
+	payment.flags.ignore_permissions = True
+
+	reference = cstr(payment_reference).strip() or cstr(payment.get("reference_no")).strip()
+
+	result = {
+		"invoice": None,
+		"purchase_reference": None,
+		"proposal": name,
+		"outcome": None,
+		"settled": False,
+	}
+
+	settlement_module.settle_proposal_for_payment(
+		proposal_name=name,
+		payment=payment,
+		payment_doctype=doctype,
+		payment_document=document,
+		payment_reference=reference,
+		invoice_name=None,
+		result=result,
+	)
+
+	if cstr(note).strip() and result.get("settled"):
+		frappe.db.set_value(
+			PROPOSAL_DOCTYPE, name, "settlement_note", cstr(note).strip(), update_modified=True
+		)
+
+	if not result.get("settled"):
+		frappe.throw(
+			_("The proposal was not settled ({0}).").format(result.get("outcome")),
+			frappe.ValidationError,
+		)
+
+	return _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, name), created=None)
+
+
 # ── internals ────────────────────────────────────────────────────────────────
 
 
