@@ -91,6 +91,19 @@ PURCHASE_INPUT_FIELDS = (
 			"not a silence."
 		),
 	},
+	{
+		"fieldname": "instance_id",
+		"label": "Rest Instance",
+		"fieldtype": "Link",
+		"options": "Rest Instance",
+		"insert_after": "units",
+		"description": (
+			"Which Rest deployment this invoice bills for. Written when the invoice is "
+			"raised, and read by the settlement hook: a payment settles the proposal of "
+			"the deployment that raised it, never another deployment's proposal that "
+			"happens to share a reference."
+		),
+	},
 )
 
 
@@ -320,21 +333,79 @@ WEB_FORM_FIELDS = (
 		"label": "Amount You Are Paying",
 		"fieldtype": "Currency",
 		"reqd": 1,
-		"description": "The amount to be invoiced. You will be shown the payment page next.",
+		"read_only": 1,
+		"description": (
+			"The exact price for the credits entered, computed from this site's current "
+			"rate as you type. It cannot be typed over, so what you see is what you are "
+			"billed."
+		),
 	},
 )
 
-# Set on the page: the request is created first, then the invoice and the payment
-# page are asked for in ONE call whose answer is a URL. Doing it here rather than
-# with `success_url` is what makes the destination dynamic — a static URL could not
-# name the purchase being paid for.
+# Set on the page: the request is created first, then the proposal, its invoice and
+# the payment page are asked for in ONE call whose answer is a URL. Doing it here
+# rather than with `success_url` is what makes the destination dynamic — a static
+# URL could not name the purchase being paid for.
+#
+# The script also carries the two things the page cannot know without it:
+#
+#   * the ORG SLUG, read from the link's `?org=` query parameter. The form is
+#     public, so this is the only way a submission says whose credits it is
+#     buying — and `checkout` refuses any submission that arrives without one.
+#   * the COMPUTED AMOUNT, refreshed from `quote` as the buyer types (and once on
+#     load, which also wipes any amount a crafted URL tried to pre-fill).
 WEB_FORM_CLIENT_SCRIPT = """
 frappe.ready(function () {
+\tvar params = new URLSearchParams(window.location.search);
+\tvar org = params.get("org");
+
+\tfunction fieldvalue(fieldname) {
+\t\tvar field = frappe.web_form.fields_dict[fieldname];
+\t\treturn field ? field.value : null;
+\t}
+
+\tfunction requote() {
+\t\tvar units = fieldvalue("units");
+\t\tvar channel = fieldvalue("channel");
+\t\tif (!units || !channel) {
+\t\t\treturn;
+\t\t}
+\t\tfrappe.call({
+\t\t\tmethod: "brchms.brchms_credits.proposals.quote",
+\t\t\targs: { channel: channel, units: units },
+\t\t\tcallback: function (r) {
+\t\t\t\tif (r && r.message) {
+\t\t\t\t\tfrappe.web_form.set_value("amount", r.message.amount_major);
+\t\t\t\t}
+\t\t\t}
+\t\t});
+\t}
+
+\tfrappe.web_form.on("units", function () {
+\t\trequote();
+\t});
+\tfrappe.web_form.on("channel", function () {
+\t\trequote();
+\t});
+\trequote();
+
+\tif (!org) {
+\t\tfrappe.msgprint({
+\t\t\ttitle: __("Open this form from your church's link"),
+\t\t\tindicator: "red",
+\t\t\tmessage: __(
+\t\t\t\t"This purchase form must be opened from your church's own 'Buy credits' " +
+\t\t\t\t\t"link, so the purchase says whose credits it is buying. Ask your church " +
+\t\t\t\t\t"administrator for the link."
+\t\t\t)
+\t\t});
+\t}
+
 \tfrappe.web_form.after_save = function () {
 \t\tfrappe.call({
 \t\t\tmethod: "brchms.brchms_credits.purchase.checkout",
 \t\t\ttype: "POST",
-\t\t\targs: { purchase: frappe.web_form.doc.name },
+\t\t\targs: { purchase: frappe.web_form.doc.name, org: org },
 \t\t\tcallback: function (r) {
 \t\t\t\tvar url = r && r.message && r.message.payment_url;
 \t\t\t\tif (url) {
@@ -347,7 +418,7 @@ frappe.ready(function () {
 \t\t\t\t\t\t   "Please contact us and quote " + frappe.web_form.doc.name + ".")
 \t\t\t\t\t);
 \t\t\t\t}
-\t\t\t},
+\t\t\t}
 \t\t});
 \t};
 });

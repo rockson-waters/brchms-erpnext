@@ -1,0 +1,137 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:link_slug",
+ "creation": "2026-10-17 00:00:00.000000",
+ "description": "An organization from a Rest deployment, registered here so a purchase made without an app session still has an identity to settle against. One row per (deployment, organization): it names the Customer Group the organization bills under, keeps a Customer for each of its funding groups, and owns the link slug that ties a public purchase-form submission to this organization. The slug is the document's name, so an attributed link can never resolve to two rows.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "field_order": [
+  "link_slug",
+  "instance_id",
+  "organization_id",
+  "organization_name",
+  "column_break_1",
+  "customer_group",
+  "default_group_id",
+  "default_group_name",
+  "section_break_groups",
+  "groups"
+ ],
+ "fields": [
+  {
+   "fieldname": "link_slug",
+   "fieldtype": "Data",
+   "label": "Link Slug",
+   "length": 32,
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1,
+   "description": "The opaque token in an attributed purchase link — ?org=<slug>. Read-only and unique because it IS the document's name: a link that names two organizations would settle a payment against the wrong one. Generated once at registration and never edited."
+  },
+  {
+   "fieldname": "instance_id",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Rest Instance",
+   "options": "Rest Instance",
+   "reqd": 1,
+   "search_index": 1,
+   "description": "The deployment the organization belongs to. Part of the row's identity: the app's organization and group ids are per-deployment, so two deployments may legitimately share an id and must never share a row."
+  },
+  {
+   "fieldname": "organization_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Organization Id",
+   "length": 140,
+   "reqd": 1,
+   "description": "The organization's own id in its Rest deployment, exactly as the app sends it."
+  },
+  {
+   "fieldname": "organization_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Organization",
+   "length": 200,
+   "description": "Display name, for the desk. An operator's rename in the app travels on the next registration; this field is filled from what the app sends and is never edited here."
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The ERPNext Customer Group this organization's invoices are grouped under. One per organization, so a per-church statement is one view.",
+   "fieldname": "customer_group",
+   "fieldtype": "Link",
+   "label": "Customer Group",
+   "options": "Customer Group"
+  },
+  {
+   "fieldname": "default_group_id",
+   "fieldtype": "Data",
+   "label": "Default Funding Group Id",
+   "length": 140,
+   "description": "The funding group a public-form purchase credits when the buyer arrived without one named — normally the organization's root group, sent by the app when it asks for the purchase link. Without this, a form purchase has nowhere to put its credits and is refused rather than guessed at."
+  },
+  {
+   "fieldname": "default_group_name",
+   "fieldtype": "Data",
+   "label": "Default Funding Group",
+   "length": 200,
+   "description": "The default group's display name, for the desk."
+  },
+  {
+   "fieldname": "section_break_groups",
+   "fieldtype": "Section Break",
+   "label": "Funding Groups"
+  },
+  {
+   "description": "One row per funding group that has ever bought credits. The Customer is the billing entity — credits belong to the group that pays for them, so the invoice names the group's Customer, not the organization's.",
+   "fieldname": "groups",
+   "fieldtype": "Table",
+   "label": "Funding Groups",
+   "options": "Rest Credit Organization Group"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-17 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Credits",
+ "name": "Rest Credit Organization",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Rest Integration",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

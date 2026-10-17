@@ -1,7 +1,9 @@
 # The settlement boundary
 
-**Status:** implemented on the ERPNext side; the Rest backend still calls the old
-funding API and has not been migrated.
+**Status:** implemented, and exercised end to end since v0.11.0 — the app raises
+attributed proposals that carry their own invoice and payment page, settles only
+through this boundary, and reconciles settlements automatically. The app's role
+still cannot submit, cancel, write or delete; nothing about the boundary moved.
 
 This is the normative record of *who is allowed to make credits real*. It exists
 because the previous arrangement had a defect that no amount of testing would have
@@ -189,26 +191,60 @@ explains a balance going down.
 path, and `unknown` (no such proposal) must stay distinguishable from `draft`
 (requested, unpaid): one is a bug in the app, the other is patience.
 
-## 6. Not yet done
+## 6. What has changed since (v0.11.0), and what that means for the boundary
 
-The Rest backend has **not** been migrated. It still calls `confirm_funding`, which
-writes funding records directly. Until that changes:
+The list below was the remaining work when this document was written; it is now
+done, in the same order:
 
-- the boundary exists in ERPNext but nothing exercises it;
-- the app cannot read settlements, so `get_funding`/`count_funding` remain unused;
-- `COMMUNICATION_CREDIT_PROVIDER=erpnext` does not yet mean "ERPNext settles, the app
-  reconciles".
+1. ~~**Backend** — raise a proposal at request time~~ — done in v0.10.0.
+2. ~~**Backend** — replace the confirm path with a reconcile job that reads
+   settlements and applies them exactly once~~ — done in v0.11.0
+   (`reconcileCreditSettlements`, every five minutes). The job GRANTS, but only
+   through the same gate a human uses: `confirm` re-reads the settlement state
+   (`requireSettledProposal`) before granting, and the grant is keyed on
+   `(provider, external_event_id)` — unique at the database — so a double run
+   grants once. **The boundary is unchanged: the app's role still cannot
+   submit, cancel, write or delete.**
+3. ~~**Backend** — make `purchase_reference` required on the purchase~~ — done:
+   the authority always mints one when the payer had none, and the app stores
+   what comes back (`erpnext_purchase_reference`).
+4. ~~**Retire** the app-side confirmation authority for anything but the `local`
+   provider~~ — done in v0.10.0 (the app reads the settlement instead of writing
+   a funding record; manual Confirm remains the repair path).
+5. **Credential** — verify the deployed integration token genuinely lacks
+   `submit`, against the live site rather than against the doctype JSON. Still
+   open; it needs the live walk.
 
-The remaining work, in dependency order:
+### The v0.11.0 additions, in boundary terms
 
-1. **Backend** — raise a proposal at request time instead of confirming at the end.
-2. **Backend** — replace the confirm path with a reconcile job that reads settlements
-   and applies them exactly once, idempotently.
-3. **Backend** — make `purchase_reference` required on the purchase.
-4. **Retire** the app-side confirmation authority for anything but the `local`
-   provider.
-5. **Credential** — verify the deployed integration token genuinely lacks `submit`,
-   against the live site rather than against the doctype JSON.
+- **Identity.** A purchase made without an app session is attributed before any
+  money moves: the app registers its organization (`Rest Credit Organization`,
+  named by an opaque slug), the public form refuses a submission with no slug,
+  and `checkout` bridges the intake row to a proposal that carries the
+  organization, the funding group and the deployment's instance id.
+- **The invoice moves onto the proposal.** `create_proposal` raises the Sales
+  Invoice and builds the payment page itself, so a request raised by the app is
+  payable. This is why the settlement hook now matches on
+  **(instance, reference)**: the invoice carries the deployment's instance id,
+  and a reference alone could match another deployment's proposal.
+- **Pricing is derived, never typed twice.** `amount_minor ==
+  round_half_up(units × unit_price_micros × fraction_units / 10⁶)` is enforced
+  before an invoice exists, and the invoice raise re-checks it. Half-up, because
+  a rate finer than the currency's coin cannot always divide evenly (5,555
+  segments at 0.045 is 249.975 → 249.98). The variance is computed with the same
+  rounding, so a correctly priced settlement records zero.
+
+### A correction to §"Frappe creates a unique index only for a field used as the NAME"
+
+That claim was written against an older Frappe. **Frappe 16.51 honours a Data
+field's `unique: 1` with a GLOBAL unique index**, which contradicted the
+per-deployment design: it refused the second church's identical reference, the
+exact case the composite index exists to allow. The field flag is removed and
+`after_migrate` drops the leftover global index; uniqueness is
+`(instance_id, purchase_reference)` only.
+
+The tests that pin all of this live in `brchms/tests/test_proposals.py` and
+`brchms/tests/test_settlement.py`; the full suite is green on a scratch site.
 
 ## 7. Verification
 

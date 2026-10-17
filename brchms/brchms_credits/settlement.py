@@ -41,7 +41,7 @@ app → webform → invoice → here.
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt, now_datetime
+from frappe.utils import cint, cstr, flt, now_datetime
 
 PROPOSAL_DOCTYPE = "Rest Credit Proposal"
 INVOICE_DOCTYPE = "Sales Invoice"
@@ -115,13 +115,17 @@ def settle_invoice_payments(
 		values = frappe.db.get_value(
 			INVOICE_DOCTYPE,
 			invoice_name,
-			[PURCHASE_REFERENCE_FIELD, "docstatus", "company", "grand_total"],
+			[PURCHASE_REFERENCE_FIELD, "docstatus", "company", "grand_total", "instance_id"],
 			as_dict=True,
 		)
 		if not values:
 			continue
 
 		purchase_reference = cstr(values.get(PURCHASE_REFERENCE_FIELD)).strip()
+		# Which deployment the invoice bills for. Written when the invoice is
+		# raised; absent on an invoice from before the field existed, where the
+		# reference-only lookup below is the honest fallback.
+		invoice_instance = cstr(values.get("instance_id")).strip()
 
 		result = {
 			"invoice": invoice_name,
@@ -138,9 +142,17 @@ def settle_invoice_payments(
 			result["outcome"] = "no_reference"
 			continue
 
-		proposal_name = frappe.db.get_value(
-			PROPOSAL_DOCTYPE, {"purchase_reference": purchase_reference}, "name"
-		)
+		# The proposal is matched by (deployment, reference), never the reference
+		# alone: organization and group ids are per-deployment, and two deployments
+		# sharing one ERPNext site may both have a proposal carrying the same
+		# reference. Matching on the reference alone would settle one deployment's
+		# credits with another's payment -- silently, because both sides would
+		# report the settle as a success.
+		proposal_filters = {"purchase_reference": purchase_reference}
+		if invoice_instance:
+			proposal_filters["instance_id"] = invoice_instance
+
+		proposal_name = frappe.db.get_value(PROPOSAL_DOCTYPE, proposal_filters, "name")
 		result["proposal"] = proposal_name
 		if not proposal_name:
 			result["outcome"] = "no_proposal"
@@ -239,6 +251,16 @@ def settle_proposal_for_payment(
 	result["outcome"] = "settled"
 	result["settled"] = True
 
+	# ── The two buyer-facing consequences of a settled payment ──────────────
+	#
+	# Both are best-effort by design: the money is settled, and a desk-visibility
+	# flag or a receipt that fails must not turn a completed settlement into an
+	# error the operator retries -- a retry here cannot double-settle (the
+	# docstatus check above answers first) but it CAN bury the real outcome in a
+	# second error. Each is logged if it cannot complete.
+	_mark_intake_paid(proposal_name)
+	_send_receipt(doc, invoice_name)
+
 
 def _settling_user(payment):
 	"""
@@ -255,6 +277,81 @@ def _settling_user(payment):
 		if candidate and frappe.db.exists("User", candidate):
 			return candidate
 	return None
+
+
+PURCHASE_DOCTYPE = "Rest Credit Purchase"
+
+
+def _mark_intake_paid(proposal_name):
+	"""
+	The form's intake row moves to `Paid`, so the desk sees a paid request.
+
+	Without this, a fully-paid form purchase reads "Invoiced" forever -- the row
+	that told the operator "somebody is waiting on this" never stops telling
+	them. Best-effort: the settlement stands regardless, and a failure here is
+	logged rather than raised.
+	"""
+	try:
+		for name in frappe.get_all(
+			PURCHASE_DOCTYPE, filters={"proposal": proposal_name}, pluck="name"
+		):
+			frappe.db.set_value(PURCHASE_DOCTYPE, name, "status", "Paid")
+		frappe.db.commit()
+	except Exception:
+		frappe.log_error(
+			title="brchms: could not mark the purchase behind {0} as paid".format(proposal_name),
+			message=frappe.get_traceback(),
+		)
+
+
+def _send_receipt(proposal, invoice_name):
+	"""
+	The buyer's receipt, sent when the payment settles.
+
+	## Why here and not the gateway
+
+	Paystack already mails the card path; this is for the paths with no system
+	behind them -- a bank transfer entered at the desk, cash taken at a counter.
+	For those, the settlement hook is the one moment the purchase is known to
+	be complete and the buyer's address is on the record, so this is where the
+	receipt exists or nowhere does.
+
+	Best-effort, always: a mail failure is logged and the settlement stands --
+	money that moved is a fact, and a missing mail server must not be able to
+	present a completed settlement as a failure to retry.
+	"""
+	if getattr(frappe.flags, "in_test", False):
+		return
+
+	email = cstr(proposal.get("buyer_email")).strip()
+	if not email or "@" not in email:
+		return
+
+	from brchms.brchms_credits import email_templates, invoicing
+
+	currency = cstr(proposal.get("currency")).strip() or "GHS"
+	amount = invoicing.format_minor(proposal.get("amount_minor") or 0, currency)
+	channel = cstr(proposal.get("channel")).strip().upper()
+	units = cint(proposal.get("units") or 0)
+	reference = cstr(proposal.get("purchase_reference")).strip()
+
+	subject = _("Receipt: {0} {1} credits ({2})").format(units, channel, amount)
+
+	message = email_templates.render_receipt(
+		units=units,
+		channel=channel,
+		amount=amount,
+		reference=reference,
+		invoice=invoice_name,
+	)
+
+	try:
+		frappe.sendmail(recipients=[email], subject=subject, message=message)
+	except Exception:
+		frappe.log_error(
+			title="brchms: could not send the credit purchase receipt to {0}".format(email),
+			message=frappe.get_traceback(),
+		)
 
 
 def invoice_paid_amount(payment, invoice_name):

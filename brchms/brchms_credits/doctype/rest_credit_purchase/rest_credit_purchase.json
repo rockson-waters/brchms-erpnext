@@ -11,6 +11,7 @@
   "status",
   "column_break_1",
   "invoice",
+  "proposal",
   "purchase_reference",
   "section_break_buyer",
   "buyer_name",
@@ -45,6 +46,14 @@
    "in_list_view": 1,
    "label": "Sales Invoice",
    "options": "Sales Invoice",
+   "read_only": 1
+  },
+  {
+   "description": "The attributed proposal this request became. The bridge is what lets a form purchase turn into credits: the settlement settles the PROPOSAL, and the app's reconcile poller grants against it. Set once by checkout; read-only because a second proposal for one request would be a second request for the same money.",
+   "fieldname": "proposal",
+   "fieldtype": "Link",
+   "label": "Credit Proposal",
+   "options": "Rest Credit Proposal",
    "read_only": 1
   },
   {

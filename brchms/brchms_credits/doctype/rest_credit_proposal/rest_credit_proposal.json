@@ -12,12 +12,14 @@
   "purchase_reference",
   "request_key",
   "payment_url",
+  "invoice",
   "instance_id",
   "column_break_scope",
   "organization_id",
   "organization_name",
   "funding_group_id",
   "group_name",
+  "buyer_email",
   "section_break_request",
   "channel",
   "units",
@@ -46,10 +48,9 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "length": 140,
-   "description": "The reference this proposal is identified by, and what a payment is matched against. UNIQUE PER DEPLOYMENT (a composite index, because two churches may legitimately use the same number). ALWAYS present: the deployment sends its own if the customer has one, and the app mints a short readable one otherwise -- a cash customer has no reference to give, and a proposal without a reference is unmatchable rather than merely hard to find. Because it is unique, matching returns exactly one proposal and needs no disambiguation.",
+   "description": "The reference this proposal is identified by, and what a payment is matched against. Unique PER DEPLOYMENT -- a composite index, because two churches may legitimately use the same number -- and ALWAYS present: the deployment sends its own if the customer has one, and the app mints a short readable one otherwise. Field-level uniqueness is deliberately NOT set: this Frappe honours `unique: 1` with a GLOBAL index, which would refuse the second church's identical number.",
    "search_index": 1,
-   "reqd": 1,
-   "unique": 1
+   "reqd": 1
   },
   {
    "fieldname": "request_key",
@@ -67,6 +68,15 @@
    "length": 500,
    "description": "Set by the deployment when a payment link has been created, so the customer can pay. Its presence on an unsettled proposal IS the 'awaiting payment' state -- derived rather than stored, because every stored status is a branch that has to be handled everywhere, and a derived one is handled where it is read.",
    "read_only": 1
+  },
+  {
+   "fieldname": "invoice",
+   "fieldtype": "Link",
+   "label": "Sales Invoice",
+   "options": "Sales Invoice",
+   "read_only": 1,
+   "search_index": 1,
+   "description": "The invoice raised for this proposal, so it can be paid. Raised when the proposal is created -- an unpaid proposal with no invoice is a request for money the customer cannot act on. Read-only: it is set once by the server, and a second invoice for one proposal would be a second request for the same money."
   },
   {
    "fieldname": "instance_id",
@@ -110,6 +120,14 @@
    "label": "Funding Group",
    "in_list_view": 1,
    "length": 200
+  },
+  {
+   "fieldname": "buyer_email",
+   "fieldtype": "Data",
+   "label": "Buyer Email",
+   "length": 140,
+   "options": "Email",
+   "description": "Where the receipt goes when this proposal settles. Optional: a purchase raised by the app may name no buyer, and the receipt step skips rather than fails in that case. Never used to identify the purchase -- identity is the organization, the funding group and the reference."
   },
   {
    "fieldname": "section_break_request",

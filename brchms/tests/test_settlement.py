@@ -37,14 +37,19 @@ import unittest
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import now_datetime
+from frappe.utils import cstr, now_datetime
 
-from brchms.brchms_credits import proposals, purchase as purchase_module, settlement
+from brchms.brchms_credits import proposals, purchase as purchase_module, registry, settlement
+from brchms.tests.test_proposals import (
+	_cleanup_invoices_for_instances,
+	_cleanup_registry_for_instances,
+)
 
 PROPOSAL = "Rest Credit Proposal"
 PURCHASE = "Rest Credit Purchase"
 INVOICE = "Sales Invoice"
 INSTANCE = "test:settlement-instance"
+OTHER_INSTANCE = "test:settlement-other"
 ITEM_CODE = "REST-SMS-CREDIT"
 
 
@@ -62,7 +67,15 @@ class TestSettlement(FrappeTestCase):
 	# ── fixtures ─────────────────────────────────────────────────────────────
 
 	def _clean(self):
-		"""Exact scope: only rows these tests create."""
+		"""Exact scope: only rows these tests create.
+
+		Order: PROPOSALS first -- a settled proposal carries a dynamic link to
+		the Payment Entry that settled it, and ERPNext refuses to cancel or
+		delete a document something else links to, so the payment cannot go
+		before the proposal does. Then payments, then invoices, then the
+		registry's Customers and Customer Groups (an invoice cancel
+		revalidates its links, so parties go last).
+		"""
 		for name in frappe.get_all(
 			PROPOSAL, filters={"instance_id": ("like", "test:settlement%")}, pluck="name"
 		):
@@ -83,15 +96,6 @@ class TestSettlement(FrappeTestCase):
 			frappe.delete_doc(PROPOSAL, name, force=True, ignore_permissions=True)
 
 		for name in frappe.get_all(
-			INVOICE, filters={"customer": ("like", "REST Settlement Test%")}, pluck="name"
-		):
-			doc = frappe.get_doc(INVOICE, name)
-			if doc.docstatus == 1:
-				doc.flags.ignore_permissions = True
-				doc.cancel()
-			frappe.delete_doc(INVOICE, name, force=True, ignore_permissions=True)
-
-		for name in frappe.get_all(
 			"Payment Entry",
 			filters={"reference_no": ("like", "TEST-SETTLE-%")},
 			pluck="name",
@@ -102,6 +106,20 @@ class TestSettlement(FrappeTestCase):
 				doc.cancel()
 			frappe.delete_doc("Payment Entry", name, force=True, ignore_permissions=True)
 
+		# The invoices the proposal path raises for test instances, cancelled
+		# while their billing parties still exist.
+		_cleanup_invoices_for_instances(("test:settlement%",))
+
+		for name in frappe.get_all(
+			INVOICE, filters={"customer": ("like", "REST Settlement Test%")}, pluck="name"
+		):
+			doc = frappe.get_doc(INVOICE, name)
+			if doc.docstatus == 1:
+				doc.flags.ignore_permissions = True
+				doc.cancel()
+			frappe.delete_doc(INVOICE, name, force=True, ignore_permissions=True)
+
+		_cleanup_registry_for_instances(("test:settlement%",))
 		frappe.db.delete("Rest Instance", {"name": ("like", "test:settlement%")})
 
 	def _customer(self):
@@ -148,13 +166,15 @@ class TestSettlement(FrappeTestCase):
 		company = frappe.db.get_value("Company", {}, "name")
 		return frappe.db.get_value("Company", company, "default_currency") if company else "GHS"
 
-	def _invoice(self, reference, amount=100):
+	def _invoice(self, reference, amount=100, instance=None):
 		"""
 		A submitted Sales Invoice, with the purchase reference the app would send.
 
 		The reference is written through the CUSTOM FIELD this app installs, so the
 		test also proves that field exists and is writable — a settlement that cannot
-		read it is a settlement that can never fire.
+		read it is a settlement that can never fire. `instance` optionally stamps
+		the deployment the invoice bills for, which is what the settlement's
+		cross-instance guard keys on.
 		"""
 		if not frappe.db.has_column(INVOICE, "purchase_reference"):
 			raise unittest.SkipTest(
@@ -192,6 +212,8 @@ class TestSettlement(FrappeTestCase):
 		)
 		if reference:
 			invoice.purchase_reference = reference
+		if instance:
+			invoice.instance_id = instance
 		invoice.flags.ignore_permissions = True
 		try:
 			invoice.insert()
@@ -341,6 +363,94 @@ class TestSettlement(FrappeTestCase):
 		except Exception as error:  # noqa: BLE001 - the failure IS the assertion
 			self.fail("the hook raised into the payment: {0}".format(error))
 
+	def test_one_deployments_payment_never_settles_anothers_proposal(self):
+		"""
+		The cross-instance guard. Organization and group ids are per-deployment, and
+		two deployments sharing one ERPNext site may both have a proposal carrying
+		the same reference -- so matching by reference ALONE would settle the wrong
+		deployment's credits with this payment, silently, because both sides would
+		report success.
+		"""
+		shared_reference = "TEST-SETTLE-XINSTANCE-1"
+		mine = self._proposal(shared_reference)
+
+		# The other deployment's proposal carries the SAME reference...
+		other_instance = frappe.get_doc(
+			{
+				"doctype": "Rest Instance",
+				"instance_id": OTHER_INSTANCE,
+				"display_name": "The Other Deployment",
+				"is_active": 1,
+			}
+		)
+		other_instance.flags.ignore_permissions = True
+		other_instance.insert(ignore_if_duplicate=True)
+
+		other = frappe.get_doc(
+			{
+				"doctype": PROPOSAL,
+				"instance_id": OTHER_INSTANCE,
+				"purchase_reference": shared_reference,
+				"funding_group_id": "test-group",
+				"organization_id": "test-org",
+				"channel": "sms",
+				"units": 100,
+				"amount_minor": 5000,
+				"currency": self._currency(),
+			}
+		)
+		other.flags.ignore_permissions = True
+		other.insert()
+
+		# ...and MY deployment's invoice is the one that got paid.
+		invoice = self._invoice(shared_reference, instance=INSTANCE)
+		self._pay(invoice, reference_no="TEST-SETTLE-XINSTANCE-REF")
+
+		self.assertEqual(
+			1,
+			self._docstatus(mine),
+			"the payment did not settle the deployment it was billed to",
+		)
+		self.assertEqual(
+			0,
+			self._docstatus(other.name),
+			"one deployment's payment settled another deployment's proposal",
+		)
+
+	def test_a_form_purchases_intake_row_is_marked_paid_when_its_proposal_settles(self):
+		"""
+		The desk visibility for the public form: a paid request must stop saying
+		"Invoiced", or the operator's list of people waiting on something never
+		shortens.
+		"""
+		reference = "TEST-SETTLE-INTAKE-PAID-1"
+		proposal = self._proposal(reference)
+		invoice = self._invoice(reference)
+
+		intake = frappe.get_doc(
+			{
+				"doctype": PURCHASE,
+				"buyer_name": "Intake Test Buyer",
+				"buyer_email": "intake-test-paid@example.test",
+				"channel": "sms",
+				"units": 100,
+				"amount": 100,
+				"purchase_reference": reference,
+				"proposal": proposal,
+				"status": "Invoiced",
+			}
+		)
+		intake.flags.ignore_permissions = True
+		intake.insert()
+
+		self._pay(invoice, reference_no="TEST-SETTLE-INTAKE-PAID-REF")
+
+		self.assertEqual(
+			"Paid",
+			frappe.db.get_value(PURCHASE, intake.name, "status"),
+			"a settled proposal left the form's intake row saying Invoiced",
+		)
+
 	def test_a_settlement_against_free_text_is_refused(self):
 		"""
 		"Cash" and "Bank Transfer" are not documents, and the doctype says so.
@@ -392,6 +502,9 @@ class TestSettlement(FrappeTestCase):
 		)
 
 
+INTAKE_RATE_NOTE = "INTAKE-TEST-RATE-FIXTURE"
+
+
 class TestPurchaseIntake(FrappeTestCase):
 	"""
 	The public purchase form's server half.
@@ -399,28 +512,74 @@ class TestPurchaseIntake(FrappeTestCase):
 	## What this pins
 
 	The purchase form is the only PUBLIC write in this app, so the two things worth
-	pinning are that it produces the right invoice and that it cannot be used to
-	make credits real. The second is structural — this endpoint raises an invoice,
-	and an invoice only becomes claimable when `settlement` sees it settled, which is
-	a different class of test. What is asserted here is the first: a guest's request
-	becomes a submitted invoice carrying the reference, the channel and the units,
-	billed to a Customer the site did not have before.
+	pinning are that it produces the right attributed proposal and that it cannot be
+	used to make credits real. The second is structural -- the intake row becomes a
+	DRAFT proposal, and a proposal only becomes claimable when `settlement` sees it
+	settled, which is a different class of test (see TestSettlement above).
 
-	The gateway step is NOT exercised: `make_payment_request` needs a configured
-	Paystack account with real keys, which is a deployment's job. `checkout` is
-	therefore called only as far as the invoice, by calling `_raise_invoice`
-	directly — testing up to the boundary of what this app owns.
+	The identity requirement is the first thing pinned: a submission with no org
+	slug is refused outright, because an unattributed purchase is money on the
+	books with nowhere to put the credits it bought.
+
+	The gateway step is NOT asserted as a success: `make_payment_request` needs a
+	configured Paystack account with real keys, which is a deployment's job. On a
+	site without one, `checkout` records everything, links the intake row, and
+	refuses with the buyer's message -- which is itself pinned, because that
+	refusal is the recoverable path.
+
+	A rate row in the SITE'S OWN currency is installed for every test, because
+	`checkout` re-derives the amount from the current rate: a test that depended
+	on whatever a deployment happened to have configured would pass on one site
+	and fail on another for reasons unrelated to the code.
 	"""
 
 	def setUp(self):
 		super().setUp()
 		self._clean()
+		self._remove_rate()
+		rate = frappe.get_doc(
+			{
+				"doctype": "Rest Credit Rate",
+				"channel": "sms",
+				"unit": "sms_segment",
+				# 0.10 per segment, so 250 segments derive exactly 25.00 -- the
+				# amount the fixture request carries.
+				"price_per_unit_micros": 100000,
+				"currency": self._currency(),
+				"is_active": 1,
+				"effective_from": now_datetime(),
+				"notes": INTAKE_RATE_NOTE,
+			}
+		)
+		rate.flags.ignore_permissions = True
+		rate.insert()
+		frappe.db.commit()
 
 	def tearDown(self):
+		self._remove_rate()
 		self._clean()
 		super().tearDown()
 
+	def _remove_rate(self):
+		for name in frappe.get_all("Rest Credit Rate", filters={"notes": INTAKE_RATE_NOTE}, pluck="name"):
+			frappe.delete_doc("Rest Credit Rate", name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _currency(self):
+		company = frappe.db.get_value("Company", {}, "name")
+		return frappe.db.get_value("Company", company, "default_currency") if company else "GHS"
+
 	def _clean(self):
+		"""
+		Exact scope: only what these tests create.
+
+		Invoices are cancelled while their billing parties still exist -- the
+		registry's Customers (which the checkout invoices are billed to) are
+		deleted LAST, because a cancel revalidates links and a missing party
+		refuses it.
+		"""
+		_cleanup_invoices_for_instances(("test:settlement%",))
+
 		for name in frappe.get_all(
 			PURCHASE, filters={"buyer_email": ("like", "intake-test-%")}, pluck="name"
 		):
@@ -435,10 +594,26 @@ class TestPurchaseIntake(FrappeTestCase):
 				doc.cancel()
 			frappe.delete_doc(INVOICE, name, force=True, ignore_permissions=True)
 
+		frappe.db.delete(PROPOSAL, {"instance_id": ("like", "test:settlement%")})
+
 		for name in frappe.get_all(
-			"Customer", filters={"customer_name": ("like", "Intake Test Buyer%")}, pluck="name"
+			"Customer", filters={"customer_name": ("like", "Intake Test%")}, pluck="name"
 		):
 			frappe.delete_doc("Customer", name, force=True, ignore_permissions=True)
+
+		_cleanup_registry_for_instances(("test:settlement%",))
+		frappe.db.delete("Rest Instance", {"name": ("like", "test:settlement%")})
+		frappe.db.commit()
+
+	def _register_church(self):
+		"""The registry row an attributed link stands on, with a default group."""
+		return registry.ensure_registration(
+			instance_id=INSTANCE,
+			organization_id="org-intake-1",
+			organization_name="Intake Test Church",
+			default_group_id="grp-intake-1",
+			default_group_name="Intake Test Group",
+		)
 
 	def _request(self, **overrides):
 		values = {
@@ -450,7 +625,6 @@ class TestPurchaseIntake(FrappeTestCase):
 			"channel": "sms",
 			"units": 250,
 			"amount": 25,
-			"purchase_reference": "INTAKE-REF-1",
 		}
 		values.update(overrides)
 		doc = frappe.get_doc(values)
@@ -458,47 +632,77 @@ class TestPurchaseIntake(FrappeTestCase):
 		doc.insert()
 		return doc
 
-	def test_a_guest_request_becomes_a_submitted_invoice(self):
-		"""The invoice is real, attributable and carries what was ordered."""
+	def test_a_submission_without_an_org_slug_is_refused(self):
+		"""
+		The identity requirement. A stranger typing "buy credits" cannot name a
+		funding group, and the app grants units to a group -- so the purchase
+		must arrive already attributed, or not at all.
+		"""
 		purchase = self._request()
-		invoice_name = purchase_module._raise_invoice(purchase)
-		invoice = frappe.get_doc(INVOICE, invoice_name)
 
-		self.assertEqual(1, invoice.docstatus, "the invoice must be submitted to be payable")
-		self.assertEqual("INTAKE-REF-1", invoice.purchase_reference)
-		self.assertEqual("sms", invoice.channel)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			purchase_module.checkout(purchase=purchase.name)
+
+		message = str(caught.exception)
+		self.assertIn("church's own purchase link", message)
+		# Nothing was raised: no proposal, no invoice.
+		self.assertFalse(frappe.db.get_value(PURCHASE, purchase.name, "proposal"))
+		self.assertEqual("Requested", purchase.status)
+
+	def test_an_unknown_slug_is_refused(self):
+		purchase = self._request()
+
+		with self.assertRaises(frappe.DoesNotExistError) as caught:
+			purchase_module.checkout(purchase=purchase.name, org="no-such-slug")
+
+		self.assertIn("no longer recognized", str(caught.exception))
+
+	def test_a_registered_churchs_submission_becomes_an_attributed_proposal(self):
+		"""
+		The bridge: the buyer's request becomes a proposal carrying the church's
+		organization, funding group and deployment id, with its invoice raised --
+		the two artefacts the settlement and the app's reconcile poller need.
+		"""
+		row = self._register_church()
+		purchase = self._request()
+		frappe.db.commit()
+
+		try:
+			result = purchase_module.checkout(purchase=purchase.name, org=row.link_slug)
+		except frappe.ValidationError as error:
+			# No Payment Gateway Account on this site: the page could not be
+			# opened. Everything else must still have happened.
+			self.assertIn("payment page could not be opened", str(error))
+			result = None
+
+		proposal_name = frappe.db.get_value(PURCHASE, purchase.name, "proposal")
+		self.assertTrue(proposal_name, "the intake row was never bridged to a proposal")
+
+		proposal = frappe.get_doc(PROPOSAL, proposal_name)
+		self.assertEqual(0, proposal.docstatus, "creating a proposal made credits claimable")
+		self.assertEqual("org-intake-1", proposal.organization_id)
+		self.assertEqual("grp-intake-1", proposal.funding_group_id)
+		self.assertEqual(INSTANCE, proposal.instance_id)
+		self.assertEqual(purchase.buyer_email, proposal.buyer_email)
+		self.assertEqual("form:{0}".format(purchase.name), proposal.request_key)
+
+		# The invoice: raised, submitted, carrying what the settlement matches by.
+		self.assertTrue(proposal.invoice)
+		invoice = frappe.get_doc(INVOICE, proposal.invoice)
+		self.assertEqual(1, invoice.docstatus)
+		self.assertEqual(INSTANCE, invoice.instance_id)
+		self.assertEqual(registry.customer_for(INSTANCE, "grp-intake-1"), invoice.customer)
 		self.assertEqual(250, invoice.units)
-		self.assertEqual(25, invoice.grand_total)
-		self.assertEqual("REST-SMS-CREDIT", invoice.items[0].item_code)
+		self.assertEqual("sms", invoice.channel)
+		# The channel decides the item, never the buyer.
+		self.assertEqual(ITEM_CODE, invoice.items[0].item_code)
 
-	def test_the_channel_decides_the_item_not_the_buyer(self):
-		"""Email credits bill the email item; the buyer never names an item."""
-		purchase = self._request(channel="email", units=100, amount=10)
-		invoice_name = purchase_module._raise_invoice(purchase)
-		invoice = frappe.get_doc(INVOICE, invoice_name)
+		# The intake row tells the desk the truth.
+		self.assertEqual("Invoiced", frappe.db.get_value(PURCHASE, purchase.name, "status"))
 
-		self.assertEqual("REST-EMAIL-CREDIT", invoice.items[0].item_code)
-
-	def test_one_buyer_email_is_one_customer(self):
-		"""
-		A repeat buyer does not become two customers.
-
-		Two Customer records for one address would split the purchase history an
-		operator reconciles payments against, which is the whole reason this mapping
-		is by email rather than by name.
-		"""
-		email = "intake-test-repeat@example.test"
-		first = self._request(buyer_email=email)
-		second = self._request(buyer_email=email, purchase_reference="INTAKE-REF-2")
-
-		first_invoice = frappe.get_doc(INVOICE, purchase_module._raise_invoice(first))
-		second_invoice = frappe.get_doc(INVOICE, purchase_module._raise_invoice(second))
-
-		self.assertEqual(
-			first_invoice.customer,
-			second_invoice.customer,
-			"the same email produced two Customer records",
-		)
+		if result is not None:
+			self.assertEqual(proposal_name, result["proposal"])
+			self.assertTrue(result["payment_url"])
 
 	def test_an_impossible_order_is_refused_with_readable_advice(self):
 		"""
@@ -506,10 +710,7 @@ class TestPurchaseIntake(FrappeTestCase):
 
 		The assertion is on the WORDS A BUYER READS, not on schema field names.
 		`docs/ERROR-MESSAGE-STANDARD.md` is normative here: a rejection says which
-		input is wrong and what a valid value looks like, in human labels. A first
-		version of this test asserted the fieldname `units` and failed against a
-		message that said "how many credits you are buying" — which is the standard
-		working, and the test being wrong.
+		input is wrong and what a valid value looks like, in human labels.
 		"""
 		cases = (
 			({"units": 0}, "how many credits"),
@@ -526,3 +727,24 @@ class TestPurchaseIntake(FrappeTestCase):
 				message,
 				"the refusal for {0} should say what to do, in the buyer's words".format(overrides),
 			)
+
+	def test_a_double_submit_resolves_to_the_same_proposal(self):
+		"""A reloaded page or a double click must not raise a second proposal."""
+		row = self._register_church()
+		purchase = self._request()
+		frappe.db.commit()
+
+		for _attempt in range(2):
+			try:
+				purchase_module.checkout(purchase=purchase.name, org=row.link_slug)
+			except frappe.ValidationError:
+				# No gateway on this site; the proposal is still raised and linked.
+				pass
+
+		self.assertEqual(
+			1,
+			frappe.db.count(
+				PROPOSAL, {"instance_id": INSTANCE, "request_key": "form:{0}".format(purchase.name)}
+			),
+			"a double submit raised a second proposal for the same money",
+		)

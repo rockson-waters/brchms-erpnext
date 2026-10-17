@@ -46,11 +46,13 @@ operator's list waiting to be paid twice. Both keys exist to make that unreachab
 """
 
 import secrets
-from urllib.parse import quote
+from urllib.parse import quote as url_quote
 
 import frappe
 from frappe import _
 from frappe.utils import add_to_date, cint, cstr, now_datetime
+
+from brchms.brchms_credits import invoicing, registry
 
 PROPOSAL_DOCTYPE = "Rest Credit Proposal"
 INSTANCE_DOCTYPE = "Rest Instance"
@@ -91,6 +93,7 @@ def create_proposal(
 	currency=None,
 	unit_price_micros=None,
 	instance_name=None,
+	buyer_email=None,
 	notes=None,
 ):
 	"""
@@ -98,6 +101,15 @@ def create_proposal(
 
 	DRAFT, always. There is no argument that makes this submit -- only a holder of
 	the `submit` permission can do that, and the app's role does not have it.
+
+	Also raises the INVOICE and, when a gateway is configured, the payment page
+	(see `ensure_page`). A proposal with no way to be paid is a request for money
+	the customer cannot act on, which is the gap this closes: both doors now
+	hand the buyer somewhere to pay. An infrastructure failure there (no
+	gateway account, no mail-configured anything) is LOGGED and leaves the
+	proposal payable-later -- `settlement_state` and `checkout` both heal it
+	-- while a DATA failure (an inconsistent price, a currency this site
+	cannot bill) is refused loudly here, before anything exists to reconcile.
 	"""
 	request_key = cstr(request_key).strip() or None
 
@@ -113,6 +125,7 @@ def create_proposal(
 		"amount_minor": amount_minor,
 		"currency": cstr(currency).strip().upper() or None,
 		"unit_price_micros": unit_price_micros,
+		"buyer_email": _cap(cstr(buyer_email).strip(), 140) or None,
 		"notes": _cap(cstr(notes).strip(), 2000) or None,
 		# The deployment's own purchase id. Not a user-visible reference: it is the
 		# idempotency key, and it must be stable across the app's retries.
@@ -140,9 +153,41 @@ def create_proposal(
 	# also where its display name and activity come from.
 	_touch_instance(payload["instance_id"], display_name=instance_name)
 
+	# ── The two data refusals, before anything exists to reconcile ──────────
+	#
+	# 1. The price triple must agree with itself at the currency's minor
+	#    precision. Both doors DERIVE the pair; this catches a hand-edited or
+	#    buggy caller before an invoice exists, because an inconsistent order
+	#    is a request for credits nobody priced.
+	invoicing.require_consistent(
+		payload["units"], payload["unit_price_micros"], payload["currency"], payload["amount_minor"]
+	)
+
+	# 2. The currency must be one this site can bill. A rate configured in a
+	#    currency the company does not keep would raise an invoice that fails
+	#    or silently misprices (the INR/USD incident), and refusing here means
+	#    the caller is told NOW, with the whole request still cheap to redo.
+	company_currency = _company_currency_if_any()
+	if company_currency and payload["currency"] != company_currency:
+		frappe.throw(
+			_(
+				"This request is quoted in {0}, but this site's company keeps its books in {1}. "
+				"An invoice in the wrong currency is a silent mispricing, so it is refused rather "
+				"than raised. Set the rate card in the company's own currency and quote again."
+			).format(
+				frappe.utils.escape_html(cstr(payload["currency"])),
+				frappe.utils.escape_html(company_currency),
+			),
+			frappe.ValidationError,
+		)
+
 	existing = _find_proposal(payload["instance_id"], request_key)
 	if existing:
-		return _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, existing), created=False)
+		doc = frappe.get_doc(PROPOSAL_DOCTYPE, existing)
+		# A proposal raised before its invoice could be built (or by an older
+		# version) is healed here rather than left permanently unpayable.
+		_ensure_page_quietly(doc)
+		return _proposal_response(doc, created=False)
 
 	# The reference is always present, and never invented by the payer.
 	#
@@ -161,7 +206,9 @@ def create_proposal(
 		# customer-supplied reference -- both resolve to the same answer.
 		winner = _find_by_reference(payload["instance_id"], supplied_reference)
 		if winner:
-			return _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, winner), created=False)
+			doc = frappe.get_doc(PROPOSAL_DOCTYPE, winner)
+			_ensure_page_quietly(doc)
+			return _proposal_response(doc, created=False)
 		frappe.throw(
 			_(
 				"Reference '{0}' is already used by another proposal for this deployment. Use a "
@@ -170,7 +217,173 @@ def create_proposal(
 			frappe.ValidationError,
 		)
 
+	_ensure_page_quietly(doc)
 	return _proposal_response(doc, created=True)
+
+
+# ── the invoice and the payment page ─────────────────────────────────────────
+
+
+def ensure_page(doc):
+	"""
+	The invoice and payment page for a proposal, raised if absent.
+
+	Idempotent: a proposal that already has its invoice answers from what is
+	stored, and re-asking for the payment page returns the SAME page rather
+	than minting a second one for the same money.
+
+	RAISES on failure -- callers decide what that means. `checkout` lets it
+	reach the buyer (they must know there is nowhere to pay); proposal
+	creation and the state reads catch it (see `_ensure_page_quietly`) so an
+	unconfigured gateway leaves the request recorded and healable rather than
+	unraised.
+
+	Runs as Administrator for the same reason `checkout` does: creating an
+	invoice is accounting work, ERPNext's `account_perm_check` will not do it
+	for the caller this method arrived as, and the deployment -- not the buyer
+	-- is the party doing the billing.
+	"""
+	if doc.invoice:
+		return {
+			"invoice": doc.invoice,
+			"payment_url": doc.payment_url or invoicing.payment_url_for(doc.invoice),
+		}
+
+	previous_user = frappe.session.user
+	frappe.set_user("Administrator")
+	try:
+		customer = registry.ensure_group(
+			instance_id=doc.instance_id,
+			organization_id=doc.organization_id,
+			funding_group_id=doc.funding_group_id,
+			group_name=doc.group_name,
+			organization_name=doc.organization_name,
+		)
+
+		invoice_name = invoicing.raise_credit_invoice(
+			customer=customer,
+			purchase_reference=doc.purchase_reference,
+			channel=doc.channel,
+			units=doc.units,
+			amount_minor=doc.amount_minor,
+			currency=doc.currency,
+			unit_price_micros=doc.unit_price_micros,
+			instance_id=doc.instance_id,
+		)
+
+		# The invoice is recorded the moment it exists, BEFORE the payment page
+		# is asked for. The page needs a configured gateway and can fail on a
+		# site that has none; if the link were written after it, a failed page
+		# would leave the invoice unrecorded -- and the next attempt would mint
+		# a SECOND invoice for the same money.
+		doc.db_set({"invoice": invoice_name})
+		frappe.db.commit()
+
+		url = invoicing.payment_url_for(invoice_name)
+		doc.db_set({"payment_url": url})
+		frappe.db.commit()
+
+		return {"invoice": invoice_name, "payment_url": url}
+	finally:
+		frappe.set_user(previous_user)
+
+
+def _ensure_page_quietly(doc):
+	"""
+	`ensure_page`, but a failure is recorded rather than raised.
+
+	For proposal creation and the state reads: the request is already a valid
+	operational record, and refusing to raise it because a gateway account is
+	missing would throw away a request somebody asked for. The proposal stands
+	unpayable, the error is on the log for the operator, and the next
+	`settlement_state` read or `checkout` retries it.
+	"""
+	if doc.docstatus != 0:
+		return
+	try:
+		ensure_page(doc)
+	except Exception:
+		frappe.log_error(
+			title="brchms: could not raise the payment page for proposal {0}".format(doc.name),
+			message=frappe.get_traceback(),
+		)
+
+
+def _company_currency_if_any():
+	"""
+	The company's own currency, or None when there is no company to ask.
+
+	None rather than a refusal, because a site with no Company cannot bill
+	anything and the invoice raise will say so in its own words; this check
+	exists to catch the mismatch EARLY, not to duplicate the no-company error.
+	"""
+	company = invoicing.site_company()
+	if not company:
+		return None
+	return frappe.db.get_value("Company", company, "default_currency")
+
+
+@frappe.whitelist(allow_guest=True)
+def quote(channel=None, units=None, currency=None):
+	"""
+	What a buyer pays for a number of credits, derived -- never typed.
+
+	Thin, and public on purpose: the purchase form's client script calls it as
+	the buyer types, so the amount on the page is computed from the same rate
+	and the same rounding the invoice will enforce. A buyer cannot submit an
+	amount that disagrees with the price, because the amount field is filled
+	by this, not by them.
+	"""
+	return invoicing.quote(channel=channel, units=units, currency=currency)
+
+
+@frappe.whitelist()
+def list_settled_proposals(instance_id=None, since=None, limit=200):
+	"""
+	Settled proposals for one deployment, newest settlement first.
+
+	The app's reconcile poller reads this: a settlement here is the only thing
+	that makes credits claimable, and the app grants against what this
+	returns. Read-only, scoped to the caller's own deployment, and carrying
+	every field the app needs to attribute a grant -- including the funding
+	group, because a form-born purchase has no app-side record to read the
+	group from.
+	"""
+	instance_id = cstr(instance_id).strip()
+	if not instance_id:
+		frappe.throw(_("instance_id is required."), frappe.MandatoryError)
+
+	filters = {"instance_id": instance_id, "docstatus": 1}
+	if cstr(since).strip():
+		filters["confirmed_at"] = (">=", cstr(since).strip())
+
+	rows = frappe.get_all(
+		PROPOSAL_DOCTYPE,
+		filters=filters,
+		fields=[
+			"name",
+			"purchase_reference",
+			"request_key",
+			"organization_id",
+			"organization_name",
+			"funding_group_id",
+			"group_name",
+			"channel",
+			"units",
+			"amount_minor",
+			"currency",
+			"unit_price_micros",
+			"buyer_email",
+			"invoice",
+			"payment_url",
+			"confirmed_at",
+			"settled_by",
+		],
+		order_by="confirmed_at desc",
+		limit_page_length=max(1, min(cint(limit) or 200, 500)),
+	)
+
+	return {"proposals": rows, "settled": len(rows)}
 
 
 def _insert_with_minted_reference(payload, request_key):
@@ -189,13 +402,16 @@ def _insert_with_minted_reference(payload, request_key):
 
 		doc = _insert_proposal(candidate, request_key)
 		if doc is not None:
+			_ensure_page_quietly(doc)
 			return _proposal_response(doc, created=True)
 
 		# The insert failed. If it failed because the REQUEST KEY now exists, a
 		# concurrent retry won and its proposal is the answer.
 		winner = _find_proposal(payload["instance_id"], request_key)
 		if winner:
-			return _proposal_response(frappe.get_doc(PROPOSAL_DOCTYPE, winner), created=False)
+			winner_doc = frappe.get_doc(PROPOSAL_DOCTYPE, winner)
+			_ensure_page_quietly(winner_doc)
+			return _proposal_response(winner_doc, created=False)
 
 	frappe.throw(
 		_(
@@ -262,6 +478,11 @@ def get_proposal(instance_id=None, request_key=None, proposal=None):
 		# A reference is unique per deployment, not globally. Answering for another
 		# deployment's proposal would let one tenant read another's payment details.
 		return None
+
+	# A draft with no invoice may be pre-gateway or pre-upgrade; heal it so the
+	# answer includes a payment page the buyer can still use. Quietly, because a
+	# read must not fail because a gateway is not yet configured.
+	_ensure_page_quietly(doc)
 
 	return _proposal_response(doc)
 
@@ -395,6 +616,10 @@ def settlement_state(instance_id=None, request_key=None):
 	elif doc.docstatus == 2:
 		state = "cancelled"
 	else:
+		# A draft with no invoice is healable: the app's "Check status" is what
+		# recovers a payment page for a purchase raised before the gateway was
+		# configured. Quietly -- the state must still be answerable.
+		_ensure_page_quietly(doc)
 		expired = bool(doc.expires_at) and cstr(doc.expires_at) < cstr(now_datetime())
 		state = "expired" if expired else "draft"
 
@@ -545,6 +770,9 @@ def _proposal_response(doc, created=None):
 		# anywhere else.
 		"awaiting_payment": awaiting_payment,
 		"payment_url": cstr(doc.payment_url) if doc.payment_url else None,
+		# The invoice this proposal raised, so both sides can point an operator at
+		# the same document when a payment is in question.
+		"invoice": cstr(doc.invoice) if doc.invoice else None,
 		"request_key": doc.request_key,
 		"payment_reference": doc.payment_reference,
 		"expires_at": cstr(doc.expires_at) if doc.expires_at else None,
@@ -554,6 +782,9 @@ def _proposal_response(doc, created=None):
 		"payment_doctype": doc.payment_doctype,
 		"payment_document": doc.payment_document,
 		"has_payment_evidence": bool(doc.payment_doctype and doc.payment_document),
+		# Where the receipt goes. Optional: a proposal may be raised by the app
+		# without one, and the receipt step skips rather than fails in that case.
+		"buyer_email": cstr(doc.buyer_email) if doc.buyer_email else None,
 	}
 
 	if created is not None:
@@ -704,11 +935,54 @@ def after_migrate():
 	"""
 	Called by `bench migrate` via the hook in `hooks.py`.
 
-	Idempotent, and silent when the index is already there -- a migration runs on every
+	Idempotent, and silent when its work is already done -- a migration runs on every
 	deploy and must not fail because its work was already done.
 	"""
+	created = []
 	if ensure_uniqueness_constraint():
-		frappe.logger().info("brchms: added the unique purchase_reference index")
+		created.append("the per-deployment unique index")
+	if drop_global_reference_index():
+		created.append("dropped the global purchase_reference unique index")
+	if created:
+		frappe.logger().info("brchms: purchase_reference indexes: %s", ", ".join(created))
+
+
+def drop_global_reference_index():
+	"""
+	Remove the GLOBAL unique index the field's old `unique: 1` flag created.
+
+	This Frappe honours `unique: 1` on a Data field with a single-column unique
+	index -- unlike the version the composite index was written for, where the
+	flag produced nothing. The flag is gone from the doctype, but a site that
+	migrated while it was set still carries the index, and it quietly contradicts
+	the design: it refuses the second deployment's identical reference (which the
+	composite index exists to allow) with a bare duplicate-key error.
+
+	Idempotent: absent means done.
+	"""
+	rows = frappe.db.sql(
+		"SHOW INDEX FROM `tab{0}` WHERE Key_name = %s AND Non_unique = 0".format(
+			PROPOSAL_DOCTYPE
+		),
+		("purchase_reference",),
+		as_dict=True,
+	)
+	# The composite's leading column is instance_id, so a single-column unique
+	# index of this exact name is the rogue one.
+	if not rows:
+		return False
+
+	try:
+		frappe.db.sql(
+			"ALTER TABLE `tab{0}` DROP INDEX `purchase_reference`".format(PROPOSAL_DOCTYPE)
+		)
+	except Exception as error:
+		frappe.logger().warning(
+			"brchms: could not drop the global purchase_reference unique index: %s", error
+		)
+		return False
+
+	return True
 
 
 def ensure_uniqueness_constraint():
@@ -757,7 +1031,14 @@ PURCHASE_LINK_DOCTYPE = "Rest Credit Purchase Link"
 
 
 @frappe.whitelist()
-def get_purchase_link(purchase_reference=None):
+def get_purchase_link(
+	purchase_reference=None,
+	organization_id=None,
+	organization_name=None,
+	funding_group_id=None,
+	funding_group_name=None,
+	instance_id=None,
+):
 	"""
 	Where a customer goes to buy credits, and the customer-facing help text.
 
@@ -765,11 +1046,27 @@ def get_purchase_link(purchase_reference=None):
 	the settlement all live here, which is why switching a gateway on changes nothing
 	about who vouches for money.
 
+	## Attribution: the app registers, the link carries the slug
+
+	When the app calls with its own organization (and the default -- normally root
+	-- funding group), that organization is REGISTERED here and the returned URL
+	carries its slug: `...?org=<slug>`. That is the whole identity handoff -- the
+	public form's submission is attributed to a registered organization, so a buyer
+	who never opens the app still buys credits that land somewhere specific. The
+	slug is opaque because a church's name in a URL is both guessable and a
+	disclosure, and buys nothing.
+
+	Registration is find-or-create and never fails the link: a link that cannot
+	attribute is still renderable, and the reason is on the error log. The
+	refusal that DOES exist is on the form's side -- a submission with no slug is
+	refused outright by `checkout`, because an unattributed purchase is money on
+	the books with nowhere to put the credits it bought.
+
 	## Why the reference is appended here rather than by the app
 
 	One URL cannot say WHICH purchase is being paid. If `reference_param` is set, the
-	app is handed a URL that already identifies the purchase -- `?ref=AB12-CD34` -- so
-	the webform arrives pre-filled and nothing is retyped. Without it the customer
+	app is handed a URL that already identifies the purchase -- `?ref=AB12-CD34` --
+	so the webform arrives pre-filled and nothing is retyped. Without it the customer
 	would have to carry the reference across by hand, and a reference that has to be
 	retyped is a reference that stops matching.
 
@@ -802,15 +1099,35 @@ def get_purchase_link(purchase_reference=None):
 			frappe.ValidationError,
 		)
 
+	# ── Attribution ────────────────────────────────────────────────────────
+	#
+	# Register the organization the caller names, and carry its slug on the URL.
+	# Fail-open on purpose: the link is a convenience on a page whose real job is
+	# the ledger, and a registration problem must not take the button away.
+	registered = None
+	if cstr(instance_id).strip() and cstr(organization_id).strip():
+		try:
+			registered = registry.ensure_registration(
+				instance_id=instance_id,
+				organization_id=organization_id,
+				organization_name=organization_name,
+				default_group_id=funding_group_id,
+				default_group_name=funding_group_name,
+			)
+		except Exception:
+			frappe.log_error(
+				title="brchms: could not register the organization behind the purchase link",
+				message=frappe.get_traceback(),
+			)
+
 	reference = cstr(purchase_reference).strip()
 	param = cstr(settings.reference_param).strip()
 
 	handoff_url = url
+	if registered:
+		handoff_url = _append_param(handoff_url, "org", registered.link_slug)
 	if reference and param:
-		separator = "&" if "?" in url else "?"
-		handoff_url = "{0}{1}{2}={3}".format(
-			url, separator, quote(param), quote(reference, safe="")
-		)
+		handoff_url = _append_param(handoff_url, param, reference)
 
 	return {
 		"enabled": True,
@@ -821,4 +1138,24 @@ def get_purchase_link(purchase_reference=None):
 		# already attached rather than asking the customer for it again.
 		"identifies_purchase": bool(reference and param),
 		"reference": reference or None,
+		# The organization this link is attributed to, when the caller registered
+		# one. The app renders it ("Buy credits for Main Church") so the buyer
+		# knows whose balance they are funding before they type anything.
+		"organization_name": cstr(registered.organization_name).strip()
+		if registered
+		else (cstr(organization_name).strip() or None),
+		"organization_slug": cstr(registered.link_slug).strip() if registered else None,
+		"organization_registered": bool(registered),
 	}
+
+
+def _append_param(url, key, value):
+	"""One URL, one query parameter, URL-encoded, with the right separator.
+
+	`url_quote` rather than a bare `quote`: this module also defines the
+	PRICING method `quote` (the form's live price read), and a bare name would
+	resolve to whichever definition came last -- the kind of collision that
+	reads as a mystery failure at the call site.
+	"""
+	separator = "&" if "?" in url else "?"
+	return "{0}{1}{2}={3}".format(url, separator, url_quote(key), url_quote(cstr(value), safe=""))

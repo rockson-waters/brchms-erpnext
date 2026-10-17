@@ -2,258 +2,260 @@
 # For license information, please see license.txt
 
 """
-Turning a purchase request into an invoice and a payment page.
+The public form's bridge from a buyer's request to a proposal they can pay.
 
-## Why this step is server-side and not the Web Form's own mapping
+## What changed, and why
 
-A Web Form saves what it is given onto its target doctype. For a credit purchase
-that would mean the buyer choosing the item, the quantity and the rate — and the
-seller's accounts, company and taxes following from a public form. So the form
-records only the *request* (`Rest Credit Purchase`) and this module raises the
-invoice: the item comes from the channel, the rate is what the buyer agreed to pay,
-and every accounting decision stays with the deployment.
+The form used to raise its own Sales Invoice directly from the intake row.
+That produced money on the books that could never become credits: the
+settlement hook matches a payment to a PROPOSAL by its purchase reference,
+and nothing ever carried one -- so a paid form invoice settled nothing, and
+the app's purchase sat `requested` forever while ERPNext held the money.
 
-## Why the invoice is raised BEFORE the customer pays
+`checkout` now bridges the intake row to an attributed PROPOSAL and lets the
+one invoice path (`brchms_credits.invoicing`, shared with the app's door) do
+the rest. The proposal carries the organization, the funding group and the
+deployment's instance id, which is the whole identity the settlement and the
+app's reconcile poller need.
 
-An invoice that does not exist cannot be paid. The customer is sent to a payment
-page that names a real document, and the gateway's confirmation lands on that same
-document, which is what `brchms_credits.settlement` watches. Raising the invoice
-after payment would mean inventing a second reconciliation path for money that had
-already arrived.
+## The identity requirement
+
+`org` is the registry slug, and a submission without one is REFUSED. An
+unattributed purchase is money on the books with nowhere to put the credits
+it bought -- the app grants units to a funding GROUP, and a stranger typing
+"buy credits" cannot name one. The buyer is told to open the form from their
+church's own link, which is the only way a public submission can be honest
+about whose balance it funds.
+
+## Why this runs as Administrator
+
+The buyer is a stranger with no account here, and creating a proposal and an
+invoice is accounting work they have no rights to: ERPNext's own
+`account_perm_check` refuses the Guest outright when an invoice picks its
+receivable account, and no per-document flag reaches that check. Acting as
+the system's identity is the honest expression of what is happening -- the
+DEPLOYMENT is billing, and the buyer is only supplying what they want to buy.
+Their identity is carried on the purchase record and the proposal, which is
+why this is safe to expose rather than a hole.
 
 ## The two-step shape of the public entry point
 
-`checkout` is whitelisted with `allow_guest`, because the buyer is a stranger with
-no account here. It does the whole job in one call — request in, payment URL out —
-but it is deliberately the ONLY public write in this app, and it writes exactly two
-documents: the purchase's invoice, and a payment request. Everything else (marking
-the purchase, the settlement) runs server-side afterwards.
+`checkout` is whitelisted with `allow_guest`, because the buyer is a stranger
+with no account here. It does the whole job in one call -- request in,
+payment URL out -- but it is deliberately the ONLY public write in this app,
+and it writes exactly the documents the purchase needs: a proposal, its
+invoice, and a payment request. Everything else (marking the purchase,
+settling the proposal, sending the receipt) runs server-side afterwards.
 """
 
 import frappe
 from frappe import _
-from frappe.utils import cstr, flt
+from frappe.utils import cint, cstr, flt
+
+from brchms.brchms_credits import invoicing, proposals, registry
 
 PURCHASE_DOCTYPE = "Rest Credit Purchase"
-INVOICE_DOCTYPE = "Sales Invoice"
-
-# One item per channel. The channel is the buyer's choice; WHICH ITEM represents it
-# is not, which is why this mapping lives here and not in the form.
-CHANNEL_ITEMS = {
-	"sms": "REST-SMS-CREDIT",
-	"email": "REST-EMAIL-CREDIT",
-}
+PROPOSAL_DOCTYPE = "Rest Credit Proposal"
 
 
 @frappe.whitelist(allow_guest=True)
-def checkout(purchase=None):
+def checkout(purchase=None, org=None):
 	"""
-	Raise the invoice for a purchase request and return where to pay.
+	Turn a form submission into an attributed proposal, and return where to pay.
 
 	Called by the purchase page after the request has been saved. Idempotent: a
-	reloaded page or a double submit returns the SAME payment URL rather than
-	raising a second invoice for the same request.
+	reloaded page or a double submit resolves to the SAME proposal and the SAME
+	payment URL rather than raising a second one for the same money.
 
-	## Why this runs as Administrator
-
-	The buyer is a stranger with no account here, and creating an invoice is
-	accounting work they have no rights to: ERPNext's own `account_perm_check`
-	refuses the Guest outright when the invoice picks its receivable account, and no
-	per-document flag reaches that check. Acting as the system's identity is the
-	honest expression of what is happening — the DEPLOYMENT is billing, and the buyer
-	is only supplying what they want to buy. Their identity is carried on the purchase
-	record, which is why this is safe to expose rather than a hole.
-
-	Returns `{"invoice", "payment_url", "purchase", "status"}`.
+	Returns `{"purchase", "proposal", "invoice", "payment_url", "status"}`.
 	"""
 	name = cstr(purchase).strip()
 	if not name:
 		frappe.throw(_("No purchase was named, so there is nothing to pay for."), frappe.ValidationError)
+
+	# ── The identity requirement ────────────────────────────────────────────
+	slug = cstr(org).strip()
+	if not slug:
+		frappe.throw(
+			_(
+				"This form must be opened from your church's own purchase link. Ask your church "
+				"administrator for the 'Buy credits' link, and open it from there -- a purchase "
+				"has to say whose credits it is buying."
+			),
+			frappe.ValidationError,
+		)
+
+	registry_row = registry.resolve(slug)
+	if not registry_row:
+		frappe.throw(
+			_(
+				"This purchase link is no longer recognized. Ask your church administrator for a "
+				"fresh 'Buy credits' link and try again from there."
+			),
+			frappe.DoesNotExistError,
+		)
 
 	previous_user = frappe.session.user
 	frappe.set_user("Administrator")
 	try:
 		doc = frappe.get_doc(PURCHASE_DOCTYPE, name)
 
-		# A purchase already paid, or already invoiced, answers with what it has.
-		# This is what makes a refresh safe: reloading the page must not buy credits
-		# twice.
-		if doc.invoice:
+		# Already bridged: answer with the page this purchase already has. A
+		# reloaded form or a double submit must not buy credits twice.
+		if doc.proposal:
+			proposal_doc = frappe.get_doc(PROPOSAL_DOCTYPE, doc.proposal)
+			page, page_error = _page_or_error(proposal_doc)
+			doc.db_set(
+				{
+					"status": "Invoiced" if proposal_doc.invoice else doc.status,
+					**({"payment_url": page["payment_url"]} if page and page["payment_url"] else {}),
+				}
+			)
+			frappe.db.commit()
+
+			if page_error is not None:
+				_raise_page_refusal(doc.name, page_error)
+
 			return {
 				"purchase": doc.name,
-				"invoice": doc.invoice,
-				"payment_url": doc.payment_url or _payment_url_for(doc.invoice),
+				"proposal": doc.proposal,
+				"invoice": proposal_doc.invoice,
+				"payment_url": page["payment_url"] if page else None,
 				"status": doc.status,
 			}
 
-		invoice_name = _raise_invoice(doc)
-		url = _payment_url_for(invoice_name)
+		funding_group_id = cstr(registry_row.default_group_id).strip()
+		if not funding_group_id:
+			frappe.throw(
+				_(
+					"Your church's registration does not name a group to credit yet. Ask your "
+					"church administrator to open the credits page in the app once (which "
+					"completes the registration), then try again."
+				),
+				frappe.ValidationError,
+			)
 
-		doc.db_set({"invoice": invoice_name, "status": "Invoiced", "payment_url": url})
+		# ── The pair must match the rate the form quoted ────────────────────
+		#
+		# The form's amount field is computed by `quote` and read-only, so a
+		# buyer cannot type a disagreement -- but the page is public, so this
+		# re-derives the amount server-side from the same rate and refuses any
+		# mismatch. Defense in depth: this is what stops a crafted request
+		# from naming its own price for a million credits.
+		quoted = proposals.quote(channel=doc.channel, units=doc.units)
+		amount_minor = invoicing.minor_amount_for(
+			doc.units, quoted["unit_price_micros"], quoted["currency"]
+		)
+
+		if flt(doc.amount or 0) > 0:
+			form_minor = _major_to_minor(doc.amount, quoted["currency"])
+			if form_minor != amount_minor:
+				frappe.throw(
+					_(
+						"The amount on this request ({0}) does not match the current price for "
+						"{1} credits ({2}). Go back and let the form recompute the amount."
+					).format(
+						invoicing.format_minor(form_minor, quoted["currency"]),
+						cint(doc.units),
+						invoicing.format_minor(amount_minor, quoted["currency"]),
+					),
+					frappe.ValidationError,
+				)
+
+		# ── The proposal, carrying the identity the settlement needs ─────────
+		result = proposals.create_proposal(
+			instance_id=registry_row.instance_id,
+			# The form's own row is the idempotency key: a re-submitted form
+			# resolves to the SAME proposal rather than raising a second one
+			# for the same money.
+			request_key="form:{0}".format(doc.name),
+			purchase_reference=doc.purchase_reference or None,
+			organization_id=registry_row.organization_id,
+			organization_name=registry_row.organization_name,
+			funding_group_id=funding_group_id,
+			group_name=registry_row.default_group_name,
+			channel=doc.channel,
+			units=doc.units,
+			amount_minor=amount_minor,
+			currency=quoted["currency"],
+			unit_price_micros=quoted["unit_price_micros"],
+			instance_name=registry_row.organization_name,
+			buyer_email=doc.buyer_email,
+		)
+
+		proposal_name = result["proposal"]
+		proposal_doc = frappe.get_doc(PROPOSAL_DOCTYPE, proposal_name)
+
+		# The page, or a refusal the buyer reads. `create_proposal` already
+		# tried quietly; this try is the one that must SUCCEED for the buyer to
+		# pay -- but the intake row is linked FIRST, so a page that cannot be
+		# built leaves a recoverable record (proposal + invoice + linkage) for
+		# the desk rather than an orphaned request.
+		page, page_error = _page_or_error(proposal_doc)
+
+		doc.db_set(
+			{
+				"proposal": proposal_name,
+				# Truthful either way: the invoice exists or it does not, and a
+				# payment page is not the same fact as an invoice.
+				"status": "Invoiced" if proposal_doc.invoice else doc.status,
+				**({"payment_url": page["payment_url"]} if page and page["payment_url"] else {}),
+			}
+		)
 		frappe.db.commit()
+
+		if page_error is not None:
+			_raise_page_refusal(doc.name, page_error)
 
 		return {
 			"purchase": doc.name,
-			"invoice": invoice_name,
-			"payment_url": url,
-			"status": "Invoiced",
+			"proposal": proposal_name,
+			"invoice": proposal_doc.invoice,
+			"payment_url": page["payment_url"] if page else None,
+			"status": doc.status,
 		}
 	finally:
 		frappe.set_user(previous_user)
 
 
-def _raise_invoice(doc):
+def _page_or_error(proposal_doc):
 	"""
-	The Sales Invoice for this request, submitted so it can be paid.
+	`proposals.ensure_page`, with the failure handed back instead of raised.
 
-	Submitted rather than draft because a Payment Request (and therefore a gateway
-	page) is only valid against a submitted document, and because a draft invoice is
-	not a receivable: nothing about the sale is real until it is submitted.
+	Checkout needs BOTH the answer and the failure: the intake row must be
+	linked whatever happened, and the buyer must be told when there is no page.
 	"""
-	item_code = CHANNEL_ITEMS.get(doc.channel)
-	if not item_code:
-		frappe.throw(
-			_("This purchase names channel '{0}', which has no credit item to bill.").format(
-				frappe.utils.escape_html(cstr(doc.channel))
+	try:
+		return proposals.ensure_page(proposal_doc), None
+	except Exception as error:  # noqa: BLE001 - the refusal is re-raised by the caller
+		frappe.log_error(
+			title="brchms: the payment page for proposal {0} could not be opened".format(
+				proposal_doc.name
 			),
-			frappe.ValidationError,
+			message=frappe.get_traceback(),
 		)
-
-	if not frappe.db.exists("Item", item_code):
-		frappe.throw(
-			_(
-				"The credit item {0} does not exist, so this purchase cannot be billed. Run "
-				"`bench migrate` to install it."
-			).format(frappe.utils.escape_html(item_code)),
-			frappe.DoesNotExistError,
-		)
-
-	company = frappe.defaults.get_defaults().company or frappe.db.get_value("Company", {}, "name")
-	if not company:
-		frappe.throw(
-			_("This site has no Company, so no invoice can be raised."),
-			frappe.DoesNotExistError,
-		)
-
-	customer = _customer_for(doc)
-	currency = doc.currency or frappe.db.get_value("Company", company, "default_currency")
-
-	invoice = frappe.get_doc(
-		{
-			"doctype": INVOICE_DOCTYPE,
-			"company": company,
-			"customer": customer,
-			"posting_date": frappe.utils.nowdate(),
-			"currency": currency,
-			# The buyer agreed to THIS amount, so it is what they are billed. The
-			# units travel beside it, and the settlement is where the two are checked
-			# against the rate rather than silently reconciled here.
-			"purchase_reference": doc.purchase_reference,
-			"channel": doc.channel,
-			"units": doc.units,
-			"items": [
-				{
-					"item_code": item_code,
-					"description": _("{0} credits for {1}").format(
-						frappe.utils.escape_html(cstr(doc.channel).upper()), doc.units
-					),
-					"qty": 1,
-					"rate": flt(doc.amount),
-				}
-			],
-		}
-	)
-	invoice.flags.ignore_permissions = True
-	invoice.insert()
-	invoice.submit()
-	frappe.db.commit()
-
-	return invoice.name
+		return None, error
 
 
-def _customer_for(doc):
+def _raise_page_refusal(purchase_name, cause):
 	"""
-	The Customer this purchase is billed to, created once per email address.
+	The buyer's message when the payment page could not be opened.
 
-	Matched on email rather than name because the same person typing "Rev. J. Mensah"
-	and "John Mensah" is one customer, and two Customer records for one buyer would
-	split their purchase history — which is exactly what an operator reconciling
-	payments against credits would need.
+	The purchase is RECORDED and the intake row is linked, so the recoverable
+	path exists: the desk retries this same call once the cause is fixed
+	(usually a Payment Gateway Account that has not been configured). The buyer
+	is told to quote the purchase's name, which is the one identifier they saw.
 	"""
-	email = cstr(doc.buyer_email).strip().lower()
-	existing = frappe.db.get_value("Customer", {"email_id": email}, "name")
-	if existing:
-		return existing
-
-	# ERPNext may name customers by a series rather than by the entered name; the
-	# getter is used so this does not depend on which naming rule the site runs.
-	#
-	# The fallbacks must be LEAF nodes. `Selling Settings.customer_group` is empty on
-	# a site that never ran the setup wizard, and defaulting to the tree ROOT
-	# ("All Customer Groups") is refused with "Cannot select a Group type Customer
-	# Group" — the failure a buyer would see as a broken purchase page.
-	customer_group = frappe.db.get_single_value("Selling Settings", "customer_group") or _leaf(
-		"Customer Group"
-	)
-	territory = frappe.db.get_single_value("Selling Settings", "territory") or _leaf("Territory")
-
-	customer = frappe.get_doc(
-		{
-			"doctype": "Customer",
-			"customer_name": cstr(doc.buyer_name).strip(),
-			"customer_type": "Individual",
-			"email_id": email,
-			"customer_group": customer_group,
-			"territory": territory,
-		}
-	)
-	customer.flags.ignore_permissions = True
-	customer.insert()
-	frappe.db.commit()
-
-	return customer.name
-
-
-def _leaf(doctype):
-	"""
-	A non-group row of a tree doctype, for use where a leaf is required.
-
-	None when the tree has no leaves at all, so the doctype's own validation reports
-	the site's problem rather than this module inventing a node to silence it.
-	"""
-	return frappe.db.get_value(doctype, {"is_group": 0}, "name")
-
-
-def _payment_url_for(invoice_name):
-	"""
-	Where this invoice can be paid, creating the gateway request if needed.
-
-	`make_payment_request` is ERPNext's own builder. It is reached only from
-	`checkout`, which has already taken the administrator identity — the buyer is
-	identified by their purchase record, and the gateway page they are sent to is the
-	system's choice rather than theirs.
-	"""
-	from erpnext.accounts.doctype.payment_request.payment_request import make_payment_request
-
-	existing = frappe.db.get_value(
-		"Payment Request",
-		{"reference_doctype": INVOICE_DOCTYPE, "reference_name": invoice_name},
-		"name",
-	)
-	if existing:
-		return frappe.get_doc("Payment Request", existing).get_payment_url()
-
-	request = make_payment_request(
-		dt=INVOICE_DOCTYPE,
-		dn=invoice_name,
-		submit_doc=True,
-		return_doc=True,
-		# The buyer is being redirected to the gateway in the same breath, so the
-		# email ERPNext would otherwise send duplicates the page they are already
-		# looking at — and it would make the whole purchase depend on a configured
-		# outgoing Email Account, turning a missing mail server into a purchase page
-		# that cannot be used at all.
-		mute_email=1,
+	frappe.throw(
+		_(
+			"Your purchase was recorded, but the payment page could not be opened. Please "
+			"contact us and quote {0}."
+		).format(frappe.utils.escape_html(cstr(purchase_name))),
+		frappe.ValidationError,
 	)
 
-	return request.get_payment_url()
+
+def _major_to_minor(amount_major, currency):
+	"""A Currency-field value (major units) as an exact minor-unit integer."""
+	fraction = invoicing.currency_fraction_units(currency)
+	return int(round(flt(amount_major) * fraction))

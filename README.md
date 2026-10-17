@@ -10,7 +10,7 @@ Two jobs, in one app:
 
 | Module | What it is |
 | --- | --- |
-| `brchms_credits` | The **funding authority**. `confirm_funding` records what has been paid for — once — and hands the Rest app the units and money it needs to move its own credit ledger. |
+| `brchms_credits` | The **funding authority**. The app raises credit proposals; money becomes real only when this site settles one on the books. It also owns the buyer-identity registry, the invoice/payment-page path, the rate card the app is quoted from, and the receipt a settled purchase sends. |
 | `brchms_banner` | The **announcement banner** the Rest app shows on every page (maintenance, upgrades, outages). |
 
 One app rather than two: they share one deployment, one integration user, one
@@ -19,10 +19,33 @@ each of those.
 
 ## The contract Rest speaks
 
-Both endpoints are whitelisted methods, so Frappe wraps their return value in
-`message`. Both use token auth: `Authorization: token <api_key>:<api_secret>`.
+All endpoints are whitelisted methods, so Frappe wraps their return value in
+`message`. All use token auth: `Authorization: token <api_key>:<api_secret>`.
 
-### `POST /api/method/brchms.brchms_credits.api.confirm_funding`
+### The CURRENT contract: proposals (v0.10.0+)
+
+The app no longer asks this site to record a funding event. It raises a credit
+**proposal**, and money becomes real only when a person (or the gateway's own
+handler) settles that proposal on the books — the boundary itself is documented in
+[`docs/SETTLEMENT-BOUNDARY.md`](docs/SETTLEMENT-BOUNDARY.md). The methods the app
+calls today live in `brchms.brchms_credits.proposals`:
+
+| method | direction | why |
+| --- | --- | --- |
+| `create_proposal(...)` | app → site | raise a purchase request; DRAFT only. It also raises the Sales Invoice and builds the payment page when a gateway is configured, and returns `payment_url`. |
+| `settlement_state(instance_id, request_key)` | app → site | one word — `draft` / `settled` / `expired` / `cancelled` / `unknown`. The hot-path question. |
+| `list_settled_proposals(instance_id)` | app → site | what the app's reconcile poller applies: settlements, with the organization and funding group needed to grant against them. |
+| `quote(channel, units)` | **public** | the exact amount for a number of credits, at the current rate — the purchase form's computed amount. |
+| `get_purchase_link(...)` | app → site | the attributed purchase URL (`?org=<slug>`); registers the caller's organization on first read. |
+
+The app never submits, cancels, writes or deletes a proposal: the `Rest Integration`
+role lacks those permissions, and a settle is a decision this site makes, never one
+the app can make for itself.
+
+### `POST /api/method/brchms.brchms_credits.api.confirm_funding` (legacy)
+
+Kept for a `local`-provider or a manual backfill; the app has not called it since
+v0.10.0. Its own contract follows.
 
 ```jsonc
 // request — all money as integer STRINGS; the app stores it as biginteger

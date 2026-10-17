@@ -1,0 +1,52 @@
+{
+ "actions": [],
+ "creation": "2026-10-17 00:00:00.000000",
+ "description": "One funding group of a registered Rest organization, and the Customer its credit invoices are billed to. A child of Rest Credit Organization; identity is the pair (parent, funding_group_id), never the display name — two organizations may have groups with the same name, and matching on the name would bill one church's group as another's.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "funding_group_id",
+  "group_name",
+  "customer"
+ ],
+ "fields": [
+  {
+   "fieldname": "funding_group_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Funding Group Id",
+   "length": 140,
+   "reqd": 1,
+   "description": "The group's own id in its Rest deployment. Unique within the parent row, which is the scope that matters — ids are per-deployment."
+  },
+  {
+   "fieldname": "group_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Funding Group",
+   "length": 200
+  },
+  {
+   "description": "The billing entity for this group. Credits belong to the group that pays for them, so the invoice names this Customer and not the organization's.",
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-10-17 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Credits",
+ "name": "Rest Credit Organization Group",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

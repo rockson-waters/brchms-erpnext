@@ -21,6 +21,8 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint, cstr, now_datetime
 
+from brchms.brchms_credits import invoicing
+
 # Doctypes whose records already carry a gateway's own transaction identifier, so the
 # proposal does not need a hand-entered reference on top of them.
 GATEWAY_MANAGED_DOCTYPES = {"Payment Request", "Integration Request"}
@@ -169,19 +171,17 @@ class RestCreditProposal(Document):
 		"""
 		What `units x unit_price_micros` comes to, in minor units.
 
-		Uses the currency's own subunit count rather than a fixed 10,000: most
-		currencies have two decimal places, but one like MGA has five subunits per
-		major unit, and a hardcoded factor would be wrong by 5x there.
+		Computed with the SAME half-up rounding the pricing invariant uses
+		(`invoicing.minor_amount_for`), so a settlement that matches its quote
+		records a variance of exactly zero in every currency -- a floor here and
+		a round there would disagree by one minor unit on precisely the
+		payments that were priced correctly, which is a false alarm an operator
+		would have to chase.
 		"""
 		if not self.unit_price_micros or not self.units:
 			return None
 
-		subunits = _currency_subunits(self.currency)
-		if not subunits:
-			return None
-
-		# micros / (10^6) * subunits  ==  units * micros * subunits / 10^6
-		return (int(self.units) * int(self.unit_price_micros) * subunits) // 10**6
+		return invoicing.minor_amount_for(self.units, self.unit_price_micros, self.currency)
 
 	def _require_evidence_of_payment(self):
 		"""
@@ -274,26 +274,3 @@ class RestCreditProposal(Document):
 			"WHERE `name` = %(instance)s",
 			{"now": now_datetime(), "instance": self.instance_id},
 		)
-
-
-def _currency_subunits(currency):
-	"""
-	How many minor units make one major unit of `currency`.
-
-	Read from `Currency.fraction_units` rather than assumed to be 100. The
-	overwhelming majority are 100, but a currency like MGA has 5, and a hardcoded
-	factor would be wrong by a clean multiple -- which is the kind of error that
-	looks like a real number and survives review.
-
-	`number_format` is NOT this: it is a display preference (whether to group digits
-	as 1,000 or 1.000). Using it here was a mistake, caught by listing the doctype's
-	actual fields.
-	"""
-	fraction = frappe.db.get_value("Currency", currency, "fraction_units")
-	if fraction:
-		return cint(fraction)
-
-	# No explicit fraction recorded. Two decimal places is the norm and the
-	# documented default for this integration, so it is applied knowingly rather
-	# than by accident.
-	return 100
