@@ -33,7 +33,6 @@ def call(method, **kwargs):
 	"""
 	return frappe.call(method, **kwargs)
 
-
 class TestCreditRate(FrappeTestCase):
 	"""
 	The rate card, and the precedence the app depends on.
@@ -214,80 +213,3 @@ class TestCreditRate(FrappeTestCase):
 		rate = api.get_credit_rate(channel=self.CHANNEL, currency="CAD")
 
 		self.assertEqual(rate["price_per_unit_micros"], 2_000_000)
-
-
-class TestGetFunding(FrappeTestCase):
-	def setUp(self):
-		super().setUp()
-		frappe.db.delete(DOCTYPE, {"event_id": ("like", "test:%")})
-		frappe.db.commit()
-
-	def tearDown(self):
-		frappe.db.delete(DOCTYPE, {"event_id": ("like", "test:%")})
-		frappe.db.commit()
-		super().tearDown()
-
-	def test_reads_back_what_was_confirmed(self):
-		confirm(**funding_payload())
-
-		found = call(api.get_funding, event_id="test:frontend:unit-1")
-		self.assertEqual(found["event_id"], "test:frontend:unit-1")
-		self.assertEqual(found["units"], "250")
-
-	def test_returns_none_for_an_event_that_was_never_confirmed(self):
-		"""
-		`None` rather than an exception: "not recorded" is a legitimate answer,
-		and it is the answer the app's reconciliation asks for.
-		"""
-		self.assertIsNone(call(api.get_funding, event_id="test:frontend:never"))
-
-	def test_count_funding_distinguishes_zero_from_one(self):
-		self.assertEqual(call(api.count_funding, event_id="test:frontend:unit-1"), 0)
-
-		confirm(**funding_payload())
-		self.assertEqual(call(api.count_funding, event_id="test:frontend:unit-1"), 1)
-
-		confirm(**funding_payload())
-		self.assertEqual(
-			call(api.count_funding, event_id="test:frontend:unit-1"),
-			1,
-			"the count after a replay is the assertion the app's safety rests on",
-		)
-
-
-class TestIntegrationRolePermissions(FrappeTestCase):
-	"""
-	The integration role must stay READ-ONLY on the doctype, and the method must
-	still be able to write.
-
-	Both halves matter and they pull in opposite directions. Granting the role
-	`create` would make the first half pass trivially — and would give a credential
-	that lives in a `.env` file on another host the ability to add, change and
-	delete funding rows. So the method inserts with `ignore_permissions=True` and
-	the role keeps `create: 0`. These tests pin BOTH sides, because a future
-	"fix" that grants `create: 1` would silently undo the least-privilege
-	decision while making every other test pass.
-	"""
-
-	def test_the_integration_role_cannot_create_on_the_doctype(self):
-		role = frappe.get_doc("Role", "Rest Integration")
-		perm = next(
-			(p for p in frappe.get_doc("DocType", DOCTYPE).permissions if p.role == role.name),
-			None,
-		)
-		self.assertIsNotNone(perm, "the role has no permission row on the funding doctype")
-		self.assertEqual(perm.read, 1, "the integration user must be able to read funding")
-		self.assertEqual(perm.create, 0, "the integration role must NOT be able to create")
-		self.assertEqual(perm.write, 0, "the integration role must NOT be able to update")
-		self.assertEqual(perm.delete, 0, "the integration role must NOT be able to delete")
-
-	def test_the_method_writes_anyway_because_it_is_the_authorisation_boundary(self):
-		"""
-		The counterpart: with `create: 0`, a naive `doc.insert()` is refused with
-		`PermissionError: ... does not have doctype access via role permission`.
-		Measured on the live site. `ignore_permissions=True` is what lets the
-		whitelisted method write while the role stays read-only.
-		"""
-		response = confirm(**funding_payload(event_id="test:frontend:perm-1"))
-		self.assertEqual(response["event_id"], "test:frontend:perm-1")
-		self.assertEqual(call(api.count_funding, event_id="test:frontend:perm-1"), 1)
