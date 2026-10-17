@@ -6,7 +6,7 @@ NOTE ON NAMES: the APP is "Rest" (see `app_title` in hooks.py, and the two
 doctypes). The Python package, the Frappe app name, the module directories and
 the repository keep the historical `brchms` identifier, because those are the
 machine keys that the consuming application addresses:
-`brchms.brchms_credits.api.confirm_funding`. Renaming them is a cross-repository
+`brchms.brchms_credits.api.get_credit_rate`. Renaming them is a cross-repository
 change with a window where the two sides disagree, and it buys nothing anyone
 reads. Where a human sees a name, it says Rest.
 """
@@ -21,4 +21,4 @@ reads. Where a human sees a name, it says Rest.
 # it. Observed on the first deploy, which is how it was found.
 #
 # `hooks.py` reads THIS value rather than repeating it, so the two cannot drift.
-__version__ = "0.11.0"
+__version__ = "0.12.0"

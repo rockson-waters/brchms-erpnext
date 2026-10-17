@@ -23,6 +23,7 @@ class RestCreditRate(Document):
 	def validate(self):
 		self._validate_scope()
 		self._validate_price()
+		self._set_display_price()
 		self._validate_window()
 		self._refuse_a_retroactive_change()
 
@@ -113,6 +114,17 @@ class RestCreditRate(Document):
 
 		self.price_per_unit_micros = price
 
+	def _set_display_price(self):
+		"""
+		The price as a person reads it: "GHS 0.045", not 45000 micros.
+
+		The micros column is exact and is what the app charges from; this column is
+		derived so an operator setting a rate can see the number they mean. Kept in
+		step here rather than in a client script, so the stored value is right
+		whether the row was saved from the desk, an import or the API.
+		"""
+		self.price_per_unit_display = format_micros(self.price_per_unit_micros, self.currency)
+
 	def _validate_window(self):
 		if not self.effective_from:
 			frappe.throw(
@@ -156,8 +168,15 @@ class RestCreditRate(Document):
 		if not changed:
 			return
 
+		# Count PROPOSALS, not funding records.
+		#
+		# The funding doctype this used to count was retired when the settled
+		# proposal became the funding event, so the guard silently counted zero
+		# rows and stopped protecting anything. A proposal carries the price it
+		# was quoted at (`unit_price_micros`), which is the fact that matters:
+		# editing a rate a proposal was quoted from would rewrite history.
 		quoted = frappe.db.count(
-			"Rest Communication Credit Funding",
+			"Rest Credit Proposal",
 			{
 				"channel": before.channel,
 				"currency": before.currency,
@@ -168,9 +187,32 @@ class RestCreditRate(Document):
 		if quoted:
 			frappe.throw(
 				_(
-					"{0} funding record(s) were already quoted at {1} micros for {2}/{3}. Editing "
-					"this rate would change what was charged for money already paid. Add a NEW rate "
-					"with a later Effective From instead -- this row stays as the record of what was "
+					"{0} proposal(s) were already quoted at {1} micros for {2}/{3}. Editing this "
+					"rate would change what was charged for money already paid. Add a NEW rate with "
+					"a later Effective From instead -- this row stays as the record of what was "
 					"charged before."
 				).format(quoted, before.price_per_unit_micros, before.channel, before.currency)
 			)
+
+
+def format_micros(micros, currency):
+	"""
+	Render a micros integer as a natural price: 45000 -> "GHS 0.045".
+
+	Up to six decimal places, at least two; trailing zeros trimmed so 0.05 stays
+	"0.05" rather than "0.050000", while a whole price keeps its cents ("1.00").
+	"""
+	try:
+		price = int(micros)
+	except (TypeError, ValueError):
+		return None
+	if price < 0:
+		return None
+
+	sign = "-" if price < 0 else ""
+	whole, fraction = divmod(abs(price), 1_000_000)
+	digits = f"{fraction:06d}".rstrip("0")
+	if len(digits) < 2:
+		digits = digits.ljust(2, "0")
+	value = f"{sign}{whole}.{digits}"
+	return f"{currency} {value}" if currency else value

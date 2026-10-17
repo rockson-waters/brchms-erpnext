@@ -12,6 +12,7 @@
   "unit",
   "column_break_1",
   "price_per_unit_micros",
+  "price_per_unit_display",
   "currency",
   "section_break_scope",
   "country_code",
@@ -46,13 +47,21 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "Price per unit in MILLIONTHS of a major unit, so 1.00 is 1000000 and 0.045 is 45000 exactly. The same scale the funding record and the app's ledger use, so no conversion happens anywhere between here and the money. An integer, never a float.",
+   "description": "The price of ONE unit, in millionths of a major unit. Read the natural price beside it: 45000 means GHS 0.045 per unit, 50000 means GHS 0.05, 1000000 means GHS 1.00. It is an integer on purpose — money is stored in exact integers so no float ever touches a price — and the display field next to it is computed from it.",
    "fieldname": "price_per_unit_micros",
    "fieldtype": "Long Int",
    "in_list_view": 1,
    "label": "Price Per Unit (micros)",
    "non_negative": 1,
    "reqd": 1
+  },
+  {
+   "fieldname": "price_per_unit_display",
+   "fieldtype": "Data",
+   "label": "Price per Unit",
+   "read_only": 1,
+   "in_list_view": 1,
+   "description": "What one unit costs, in the rate's currency — for example GHS 0.045. Computed from the micros value; this is the price a person reads."
   },
   {
    "description": "The currency this price is quoted in. A price and a currency are one fact: an amount with no currency is not a price.",

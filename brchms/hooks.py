@@ -4,9 +4,9 @@ ERPNext instance.
 
 Two jobs, deliberately in ONE app:
 
-  brchms_credits  — the funding authority. `confirm_funding` records what has
-                    been paid for, once, and hands the app the units and money it
-                    needs to move its own local ledger.
+  brchms_credits  — the funding authority. The rate card and the credit proposal
+                    live here; the proposal is the instrument the app reads to
+                    decide that money arrived, and ERPNext settles it.
   brchms_banner   — the platform announcement banner the app shows on every page
                     (maintenance, upgrades).
 
@@ -43,23 +43,16 @@ from brchms import __version__ as app_version  # noqa: E402
 # an operator reads them through the standard list views.
 required_apps = ["frappe"]
 
-# Desk-side rendering for the funding record: a clickable link to the payment it
+# Desk-side rendering for the proposal: a clickable link to the payment it
 # references, and the sending instance's name and activity beside the id.
 form_render = {
-    "Rest Communication Credit Funding": {
-        "payment_link": "brchms.brchms_credits.form_render.render_funding_extras",
-    },
     "Rest Credit Proposal": {
         "payment_link": "brchms.brchms_credits.form_render.render_proposal_extras",
     },
 }
 
-# The same renderer on print, so a printed funding record carries its payment
-# reference too.
+# The same renderer on print, so a printed proposal carries its payment reference.
 doc_events = {
-    "Rest Communication Credit Funding": {
-        "before_print": "brchms.brchms_credits.form_render.render_funding_extras",
-    },
     "Rest Credit Proposal": {
         "before_print": "brchms.brchms_credits.form_render.render_proposal_extras",
     },

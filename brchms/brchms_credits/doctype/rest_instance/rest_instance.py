@@ -10,7 +10,7 @@ class RestInstance(Document):
 	"""
 	One Rest deployment that has sent funding to this site.
 
-	Rows are created by `confirm_funding` on first contact, never by hand, so a
+	Rows are created when the app first raises a proposal, never by hand, so a
 	deployment can be recognised in a funding list without anyone having to
 	pre-register it. The document name IS the `instance_id`, which is what makes
 	the link from a funding record resolve to something with a name.

@@ -47,7 +47,7 @@ proposal, or a form checkout all converge here, and every one of them may be
 the FIRST call a deployment ever makes. So each function finds-or-creates and
 never assumes a prior step. Rows are written with `ignore_permissions` because
 the whitelisted methods that call this module are the authorisation boundary
--- the same posture as `api.confirm_funding`, which documents why the
+-- the same posture as the credits API, which documents why the
 integration role stays read-only on the doctypes themselves.
 """
 

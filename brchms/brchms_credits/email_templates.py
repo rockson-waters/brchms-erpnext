@@ -11,6 +11,9 @@ with `frappe.render_template` on the STRING, which keeps the substitutions
 testable without a site.
 """
 
+import frappe
+
+
 RECEIPT_TEMPLATE = """
 <p>{{ _("Thank you — your payment has been received.") }}</p>
 

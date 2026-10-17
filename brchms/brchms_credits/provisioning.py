@@ -61,8 +61,40 @@ def after_migrate():
 		created.append("index on purchase_reference")
 	created.extend(ensure_credit_items())
 	created.extend(ensure_purchase_web_form())
+	backfilled = backfill_rate_display()
+	if backfilled:
+		created.append("rate display backfilled for {0} rows".format(backfilled))
 
 	return created
+
+
+def backfill_rate_display():
+	"""
+	Fill `Price per Unit` for rate rows saved before the field existed.
+
+	The display is derived, so it must never be the source of truth; recomputing it
+	on migrate keeps old rows readable without changing a single price.
+	"""
+	if not frappe.db.has_column("Rest Credit Rate", "price_per_unit_display"):
+		return 0
+
+	from brchms.brchms_credits.doctype.rest_credit_rate.rest_credit_rate import (
+		format_micros,
+	)
+
+	updated = 0
+	for row in frappe.get_all(
+		"Rest Credit Rate",
+		fields=["name", "price_per_unit_micros", "currency", "price_per_unit_display"],
+	):
+		display = format_micros(row.price_per_unit_micros, row.currency)
+		if display and display != row.price_per_unit_display:
+			frappe.db.set_value(
+				"Rest Credit Rate", row.name, "price_per_unit_display", display,
+				update_modified=False,
+			)
+			updated += 1
+	return updated
 
 
 # What the purchase form collects about the REQUEST, per channel. Kept as data so
@@ -354,74 +386,172 @@ WEB_FORM_FIELDS = (
 #     buying — and `checkout` refuses any submission that arrives without one.
 #   * the COMPUTED AMOUNT, refreshed from `quote` as the buyer types (and once on
 #     load, which also wipes any amount a crafted URL tried to pre-fill).
+#
+# ## Why there is NO `frappe.ready(...)` wrapper
+#
+# There was one, and it meant NONE of this ever ran. A web form page defines
+# `frappe.ready` as a collect-only shim in its `<head>`, and
+# `frappe.website.trigger_ready()` drains that array once — at document ready,
+# which happens BEFORE the web-form bundle builds the form and executes this
+# script. So a callback registered from here lands in an array nobody drains
+# again, silently: no quote, no submit redirect, nothing in the console.
+#
+# A web-form client script is invoked from `WebForm.make()` AFTER the fields
+# exist, so it needs no ready hook at all: run at top level and use
+# `frappe.web_form.after_save` for the one event that matters.
+#
+# ## Why the change handlers are attached to the control's DOM input
+#
+# `frappe.web_form.on(fieldname, handler)` sets `field.df.change`, which only a
+# programmatic `set_value` reaches from here — a user's typing goes through the
+# control's own `change`, so relying on `on()` silently never quotes. Rather than
+# replace that handler (which would skip Frappe's parsing and leave the model
+# value unset for submission), a second `change` listener is attached directly to
+# the input: Frappe's own wiring still runs, and the quote refreshes alongside it.
 WEB_FORM_CLIENT_SCRIPT = """
-frappe.ready(function () {
-\tvar params = new URLSearchParams(window.location.search);
-\tvar org = params.get("org");
+var params = new URLSearchParams(window.location.search);
+var org = params.get("org");
 
-\tfunction fieldvalue(fieldname) {
-\t\tvar field = frappe.web_form.fields_dict[fieldname];
-\t\treturn field ? field.value : null;
-\t}
+function fieldvalue(fieldname) {
+	var field = frappe.web_form.fields_dict[fieldname];
+	if (!field) {
+		return null;
+	}
+	/*
+	 * Read the value with fallbacks. An Int control keeps the typed text in its
+	 * input; a Select control (channel) keeps its value in the model and can
+	 * report `null` from its input, so falling back to `field.value` / the doc
+	 * is what keeps the quote from silently bailing.
+	 */
+	var raw = null;
+	if (field.$input && field.$input.val) {
+		raw = field.$input.val();
+	}
+	if (raw === null || raw === undefined || raw === "") {
+		raw = field.value;
+	}
+	if ((raw === null || raw === undefined || raw === "") && frappe.web_form.doc) {
+		raw = frappe.web_form.doc[fieldname];
+	}
+	return raw === null || raw === undefined || raw === "" ? null : raw;
+}
 
-\tfunction requote() {
-\t\tvar units = fieldvalue("units");
-\t\tvar channel = fieldvalue("channel");
-\t\tif (!units || !channel) {
-\t\t\treturn;
-\t\t}
-\t\tfrappe.call({
-\t\t\tmethod: "brchms.brchms_credits.proposals.quote",
-\t\t\targs: { channel: channel, units: units },
-\t\t\tcallback: function (r) {
-\t\t\t\tif (r && r.message) {
-\t\t\t\t\tfrappe.web_form.set_value("amount", r.message.amount_major);
-\t\t\t\t}
-\t\t\t}
-\t\t});
-\t}
+function current_channel() {
+	var channel = fieldvalue("channel");
+	if (!channel) {
+		/* The form's first option is the default selection. */
+		var field = frappe.web_form.fields_dict.channel;
+		var options = field && field.df && field.df.options ? field.df.options.split("\\n") : [];
+		channel = options.length ? options[0] : null;
+	}
+	return channel;
+}
 
-\tfrappe.web_form.on("units", function () {
-\t\trequote();
-\t});
-\tfrappe.web_form.on("channel", function () {
-\t\trequote();
-\t});
-\trequote();
+function requote() {
+	var units = fieldvalue("units");
+	var channel = current_channel();
+	if (!units || !channel) {
+		return;
+	}
+	frappe.call({
+		method: "brchms.brchms_credits.proposals.quote",
+		args: { channel: channel, units: units },
+		callback: function (r) {
+			if (r && r.message) {
+				frappe.web_form.set_value("amount", r.message.amount_major);
+			}
+		}
+	});
+}
 
-\tif (!org) {
-\t\tfrappe.msgprint({
-\t\t\ttitle: __("Open this form from your church's link"),
-\t\t\tindicator: "red",
-\t\t\tmessage: __(
-\t\t\t\t"This purchase form must be opened from your church's own 'Buy credits' " +
-\t\t\t\t\t"link, so the purchase says whose credits it is buying. Ask your church " +
-\t\t\t\t\t"administrator for the link."
-\t\t\t)
-\t\t});
-\t}
+function bindquotes() {
+	/*
+	 * The controls render their inputs lazily, after this script runs, so poll
+	 * for `$input` and bind when it exists. Binding via the control is what
+	 * reaches the input a user actually types into; `frappe.web_form.on()` sets
+	 * `df.change`, which typing never reaches here.
+	 */
+	var schedule = frappe.utils.debounce(requote, 300);
+	var attempts = 0;
 
-\tfrappe.web_form.after_save = function () {
-\t\tfrappe.call({
-\t\t\tmethod: "brchms.brchms_credits.purchase.checkout",
-\t\t\ttype: "POST",
-\t\t\targs: { purchase: frappe.web_form.doc.name, org: org },
-\t\t\tcallback: function (r) {
-\t\t\t\tvar url = r && r.message && r.message.payment_url;
-\t\t\t\tif (url) {
-\t\t\t\t\tfrappe.web_form.success_message =
-\t\t\t\t\t\t"Purchase recorded. Taking you to the payment page...";
-\t\t\t\t\twindow.location.replace(url);
-\t\t\t\t} else {
-\t\t\t\t\tfrappe.msgprint(
-\t\t\t\t\t\t__("Your purchase was recorded, but the payment page could not be opened. " +
-\t\t\t\t\t\t   "Please contact us and quote " + frappe.web_form.doc.name + ".")
-\t\t\t\t\t);
-\t\t\t\t}
-\t\t\t}
-\t\t});
-\t};
-});
+	function trybind() {
+		var units = frappe.web_form.fields_dict.units;
+		var channel = frappe.web_form.fields_dict.channel;
+		if (units && units.$input && channel && channel.$input) {
+			units.$input.off("input.requote change.requote")
+				.on("input.requote change.requote", schedule);
+			channel.$input.off("input.requote change.requote")
+				.on("input.requote change.requote", schedule);
+			requote();
+			return;
+		}
+		if (attempts++ < 40) {
+			setTimeout(trybind, 250);
+		}
+	}
+
+	trybind();
+}
+
+/*
+ * The saved document's name is handed to `handle_success` and nowhere else —
+ * `frappe.web_form.doc.name` is never populated — so capture it there for the
+ * checkout call in `after_save`, which runs immediately afterwards.
+ */
+var saved_name = null;
+var original_handle_success = frappe.web_form.handle_success;
+frappe.web_form.handle_success = function (data) {
+	saved_name = data && data.name ? data.name : null;
+	return original_handle_success.apply(frappe.web_form, [data]);
+};
+
+bindquotes();
+
+/*
+ * Give Credit Type its first option as the default selection. The control has no
+ * value until the visitor picks one, so the form would refuse to submit with
+ * "Credit Type" missing even though the quote below can price the default.
+ */
+if (!fieldvalue("channel")) {
+	frappe.web_form.set_value("channel", current_channel() || "sms");
+	requote();
+}
+
+if (!org) {
+	frappe.msgprint({
+		title: __("Open this form from your church's link"),
+		indicator: "red",
+		message: __(
+			"This purchase form must be opened from your church's own 'Buy credits' " +
+				"link, so the purchase says whose credits it is buying. Ask your church " +
+				"administrator for the link."
+		)
+	});
+}
+
+frappe.web_form.after_save = function () {
+	frappe.call({
+		method: "brchms.brchms_credits.purchase.checkout",
+		type: "POST",
+		args: {
+			purchase: saved_name || (frappe.web_form.doc && frappe.web_form.doc.name),
+			org: org
+		},
+		callback: function (r) {
+			var url = r && r.message && r.message.payment_url;
+			if (url) {
+				frappe.web_form.success_message =
+					"Purchase recorded. Taking you to the payment page...";
+				window.location.replace(url);
+			} else {
+				frappe.msgprint(
+					__("Your purchase was recorded, but the payment page could not be opened. " +
+					   "Please contact us and quote " + frappe.web_form.doc.name + ".")
+				);
+			}
+		}
+	});
+};
 """
 
 
