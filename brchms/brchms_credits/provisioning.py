@@ -520,6 +520,18 @@ WEB_FORM_FIELDS = (
 # value unset for submission), a second `change` listener is attached directly to
 # the input: Frappe's own wiring still runs, and the quote refreshes alongside it.
 WEB_FORM_CLIENT_SCRIPT = """
+/*
+ * The customer-facing page is a REST purchase page, not a tour of the billing
+ * platform. Frappe's stock portal footer says "Powered by ERPNext"; hide only
+ * that badge on this route so the buyer sees the church's product, not our
+ * infrastructure vendor. The rest of the footer (legal/site links) remains.
+ */
+(function hide_platform_brand() {
+	var style = document.createElement("style");
+	style.textContent = ".footer-powered { display: none !important; }";
+	document.head.appendChild(style);
+})();
+
 var params = new URLSearchParams(window.location.search);
 var org = params.get("org");
 
