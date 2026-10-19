@@ -87,6 +87,18 @@ fixtures = [
 # only for a field used as the document NAME -- so leaving this to the doctype's
 # `unique: 1` flag would have produced no constraint at all, and two proposals could
 # share the reference the operator matches payments by.
+# The Payments app leaves a completed Stripe charge without a Payment Entry
+# because Payment Request has no `on_payment_authorized`. Reconcile only credit
+# invoices, from the gateway's own Completed Integration Request -- never from a
+# browser redirect -- so ordinary Stripe commerce is untouched.
+scheduler_events = {
+    "cron": {
+        "*/5 * * * *": [
+            "brchms.brchms_credits.stripe_settlement.reconcile_completed_stripe_payment_requests",
+        ],
+    },
+}
+
 after_migrate = [
     "brchms.brchms_credits.proposals.after_migrate",
     # The purchase flow's install-time records: the `purchase_reference` field and
