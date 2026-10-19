@@ -47,6 +47,8 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, flt
 
+from brchms.brchms_credits import billing
+
 INVOICE_DOCTYPE = "Sales Invoice"
 
 # One item per channel. The channel is the buyer's choice; WHICH ITEM represents it
@@ -112,7 +114,7 @@ def require_consistent(units, unit_price_micros, currency, amount_minor):
 	return expected
 
 
-def quote(channel=None, units=None, currency=None):
+def quote(channel=None, units=None, currency=None, company=None):
 	"""
 	What a buyer pays for a number of credits, derived -- never typed.
 
@@ -135,14 +137,16 @@ def quote(channel=None, units=None, currency=None):
 			frappe.ValidationError,
 		)
 
-	currency = cstr(currency).strip().upper() or company_default_currency()
+	company = billing.resolve_selling_company(company=company, currency=currency)
+	currency = cstr(currency).strip().upper() or company_default_currency(company)
 
-	rate = _current_rate(channel, currency)
+	rate = _current_rate(channel, currency, company)
 	amount_minor = minor_amount_for(units, rate["price_per_unit_micros"], currency)
 
 	return {
 		"channel": channel,
 		"units": units,
+		"company": company,
 		"currency": currency,
 		"unit_price_micros": int(rate["price_per_unit_micros"]),
 		"rate_name": rate.get("rate_name"),
@@ -161,6 +165,7 @@ def raise_credit_invoice(
 	currency,
 	unit_price_micros=None,
 	instance_id=None,
+	company=None,
 ):
 	"""
 	The Sales Invoice for a proposal, submitted so it can be paid.
@@ -199,11 +204,11 @@ def raise_credit_invoice(
 			frappe.DoesNotExistError,
 		)
 
-	company = site_company()
+	company = billing.resolve_selling_company(company=company, currency=currency)
 	if not company:
 		frappe.throw(_("This site has no Company, so no invoice can be raised."), frappe.DoesNotExistError)
 
-	company_currency = company_default_currency()
+	company_currency = company_default_currency(company)
 	currency = cstr(currency).strip().upper() or company_currency
 	if currency != company_currency:
 		frappe.throw(
@@ -293,11 +298,11 @@ def payment_url_for(invoice_name):
 # ── internals ────────────────────────────────────────────────────────────────
 
 
-def _current_rate(channel, currency):
-	"""The active rate for a channel, refused readably when none is configured."""
+def _current_rate(channel, currency, company=None):
+	"""The active rate for a channel+company, refused readably when none is configured."""
 	from brchms.brchms_credits import api
 
-	rate = api.get_credit_rate(channel=channel, currency=currency)
+	rate = api.get_credit_rate(channel=channel, currency=currency, company=company)
 	if not rate or rate.get("source") == "unconfigured" or cint(rate.get("price_per_unit_micros")) <= 0:
 		frappe.throw(
 			_(
@@ -314,9 +319,9 @@ def site_company():
 	return frappe.defaults.get_defaults().company or frappe.db.get_value("Company", {}, "name")
 
 
-def company_default_currency():
-	"""The currency this site's company keeps its books in."""
-	company = site_company()
+def company_default_currency(company=None):
+	"""The currency a selling company keeps its books in."""
+	company = company or billing.resolve_selling_company()
 	if not company:
 		frappe.throw(_("This site has no Company, so no price can be quoted."), frappe.ValidationError)
 	return frappe.db.get_value("Company", company, "default_currency") or "GHS"

@@ -28,6 +28,7 @@ missing field on a live site, not as a failed migration.
 
 import frappe
 from frappe import _
+from frappe.utils import cstr
 
 INVOICE_DOCTYPE = "Sales Invoice"
 PURCHASE_DOCTYPE = "Rest Credit Purchase"
@@ -64,8 +65,111 @@ def after_migrate():
 	backfilled = backfill_rate_display()
 	if backfilled:
 		created.append("rate display backfilled for {0} rows".format(backfilled))
+	scoped = backfill_company_scoping()
+	if scoped is not None:
+		created.append("company scoping: {0}".format(scoped))
 
 	return created
+
+
+def backfill_company_scoping():
+	"""
+	Point pre-existing rate/proposal/purchase rows at their company where that is
+	unambiguous.
+
+	Never guess on a multi-company site. Existing rate rows were created when the
+	site had one billing company; if there is still exactly one Company, that is
+	the only correct answer. With several companies the rows are reported as
+	unresolved and an operator must assign them before the rate card is used.
+
+	Returns a short human summary for the migrate output.
+	"""
+	companies = frappe.get_all("Company", pluck="name", limit_page_length=0)
+	counts = {}
+	for doctype in ("Rest Credit Rate", "Rest Credit Proposal", "Rest Credit Purchase"):
+		if not frappe.db.has_column(doctype, "company"):
+			counts[doctype] = "no company column yet"
+			continue
+		missing = frappe.db.sql(
+			"SELECT COUNT(*) FROM `tab{0}` WHERE company IS NULL OR company = ''".format(doctype)
+		)[0][0]
+		if not missing:
+			counts[doctype] = 0
+			continue
+		if len(companies) == 1:
+			frappe.db.sql(
+				"UPDATE `tab{0}` SET company = %s WHERE company IS NULL OR company = ''".format(doctype),
+				(companies[0],),
+			)
+			counts[doctype] = "{0} backfilled to {1}".format(missing, companies[0])
+		elif doctype == "Rest Credit Rate":
+			# A rate's CURRENCY often identifies its company unambiguously. That is
+			# safe to use: GHS belongs to the GH company, CAD to the CAD company,
+			# and only a currency shared by two companies remains unresolved.
+			by_currency = {}
+			for company in companies:
+				currency = frappe.db.get_value("Company", company, "default_currency")
+				if currency:
+					by_currency.setdefault(cstr(currency).upper(), []).append(company)
+			backfilled = 0
+			rows = frappe.db.sql(
+				"SELECT name, currency FROM `tab{0}` WHERE company IS NULL OR company = ''".format(
+					doctype
+				),
+				as_dict=True,
+			)
+			for row in rows:
+				owners = by_currency.get(cstr(row.currency).upper(), [])
+				if len(owners) == 1:
+					frappe.db.set_value(doctype, row.name, "company", owners[0], update_modified=False)
+					backfilled += 1
+			counts[doctype] = "{0} unresolved ({1} companies); {2} backfilled by currency".format(
+				missing - backfilled, len(companies), backfilled
+			)
+		else:
+			counts[doctype] = "{0} unresolved ({1} companies)".format(missing, len(companies))
+
+	# A purchase's company can also be recovered from its linked proposal or
+	# invoice even on a multi-company site. This is a lookup, not a guess.
+	if frappe.db.has_column("Rest Credit Purchase", "company"):
+		purchase_rows = frappe.db.sql(
+			"SELECT name, proposal FROM `tabRest Credit Purchase` "
+			"WHERE (company IS NULL OR company = '') AND proposal IS NOT NULL AND proposal != ''",
+			as_dict=True,
+		)
+		recovered = 0
+		for row in purchase_rows:
+			proposal_company = frappe.db.get_value("Rest Credit Proposal", row.proposal, "company")
+			if proposal_company:
+				frappe.db.set_value(
+					"Rest Credit Purchase", row.name, "company", proposal_company, update_modified=False
+				)
+				recovered += 1
+		if recovered:
+			counts["Rest Credit Purchase"] = "{0} recovered from proposals: {1}".format(
+				counts.get("Rest Credit Purchase"), recovered
+			)
+
+	# A proposal's company can also be recovered from its invoice even on a
+	# multi-company site: the invoice already knows. This is not a guess.
+	if frappe.db.has_column("Rest Credit Proposal", "company"):
+		rows = frappe.get_all(
+			"Rest Credit Proposal",
+			filters={"company": ("is", "not set"), "invoice": ("is", "set")},
+			fields=["name", "invoice"],
+			limit_page_length=0,
+		)
+		for row in rows:
+			invoice_company = frappe.db.get_value("Sales Invoice", row.invoice, "company")
+			if invoice_company:
+				frappe.db.set_value(
+					"Rest Credit Proposal", row.name, "company", invoice_company, update_modified=False
+				)
+				counts["Rest Credit Proposal"] = "{0}; {1} recovered from invoices".format(
+					counts.get("Rest Credit Proposal"), row.name
+				)
+
+	return counts
 
 
 def backfill_rate_display():
@@ -367,10 +471,17 @@ WEB_FORM_FIELDS = (
 		"reqd": 1,
 		"read_only": 1,
 		"description": (
-			"The exact price for the credits entered, computed from this site's current "
-			"rate as you type. It cannot be typed over, so what you see is what you are "
+			"The exact price for the credits entered, computed from your church's billing "
+			"region as you type. It cannot be typed over, so what you see is what you are "
 			"billed."
 		),
+	},
+	{
+		"fieldname": "currency",
+		"label": "Currency",
+		"fieldtype": "Data",
+		"read_only": 1,
+		"description": "The selling company's currency for this purchase, resolved from the organization.",
 	},
 )
 
@@ -455,13 +566,44 @@ function requote() {
 	}
 	frappe.call({
 		method: "brchms.brchms_credits.proposals.quote",
-		args: { channel: channel, units: units },
+		args: { channel: channel, units: units, org: org },
 		callback: function (r) {
 			if (r && r.message) {
 				frappe.web_form.set_value("amount", r.message.amount_major);
+				/*
+				 * `currency` is a hidden field in the doctype; defensively set it
+				 * only when the form actually built a control for it. The amount
+				 * field is the important one, and the notice below names the
+				 * currency either way.
+				 */
+				if (frappe.web_form.fields_dict.currency) {
+					frappe.web_form.set_value("currency", r.message.currency);
+				}
+				show_billing(r.message.company, r.message.currency);
 			}
 		}
 	});
+}
+
+function show_billing(company, currency) {
+	/*
+	 * The buyer sees WHICH company is selling to them and in which currency.
+	 * The app and the form are region-scoped: a Canadian link must never show a
+	 * Ghanaian price, and the form's only context is the org slug.
+	 */
+	var target = $(".rest-credit-billing-note");
+	if (!target.length) {
+		target = $("<div class='rest-credit-billing-note text-muted small mt-2'></div>");
+		var amount = frappe.web_form.fields_dict.amount;
+		if (amount && amount.$wrapper) {
+			amount.$wrapper.after(target);
+		} else {
+			return;
+		}
+	}
+	if (company) {
+		target.text(__("Billed by {0} in {1}.", [company, currency || ""]));
+	}
 }
 
 function bindquotes() {

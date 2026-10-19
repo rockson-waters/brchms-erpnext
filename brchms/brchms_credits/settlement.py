@@ -152,10 +152,31 @@ def settle_invoice_payments(
 		if invoice_instance:
 			proposal_filters["instance_id"] = invoice_instance
 
-		proposal_name = frappe.db.get_value(PROPOSAL_DOCTYPE, proposal_filters, "name")
+		proposal_match = frappe.db.get_value(
+			PROPOSAL_DOCTYPE, proposal_filters, ["name", "company", "currency"], as_dict=True
+		)
+		proposal_name = cstr(proposal_match.name).strip() if proposal_match else None
 		result["proposal"] = proposal_name
 		if not proposal_name:
 			result["outcome"] = "no_proposal"
+			continue
+
+		# A payment must settle the proposal of the SAME selling company. Two
+		# companies on one site can legitimately carry the same deployment/reference
+		# pair only by defect; settling across them would put GHS credits against a
+		# CAD invoice (or the reverse) and report success. Refuse and leave both
+		# documents intact for the operator.
+		invoice_company = cstr(values.get("company")).strip()
+		proposal_company = cstr(proposal_match.company).strip()
+		if proposal_company and invoice_company and proposal_company != invoice_company:
+			result["outcome"] = "company_mismatch"
+			frappe.log_error(
+				title="brchms: paid invoice company does not match its proposal",
+				message=(
+					"Invoice {0} is from {1}, but proposal {2} is from {3}. "
+					"The proposal was NOT settled."
+				).format(invoice_name, invoice_company, proposal_name, proposal_company),
+			)
 			continue
 
 		settle_proposal_for_payment(

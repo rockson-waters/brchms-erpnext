@@ -22,6 +22,12 @@ from frappe.utils import add_days, now_datetime
 from brchms.brchms_credits import api
 
 
+def site_currency():
+	"""The test company's own currency. A rate in any other currency is refused."""
+	company = frappe.db.get_value("Company", {}, "name")
+	return frappe.db.get_value("Company", company, "default_currency") if company else "GHS"
+
+
 def call(method, **kwargs):
 	"""
 	Invoke a WHITELISTED method the way Frappe does.
@@ -63,7 +69,7 @@ class TestCreditRate(FrappeTestCase):
 			"channel": self.CHANNEL,
 			"unit": "sms_segment",
 			"price_per_unit_micros": price,
-			"currency": "CAD",
+			"currency": site_currency(),
 			"country_code": country_code,
 			"is_active": is_active,
 			"effective_from": now_datetime(),
@@ -78,7 +84,7 @@ class TestCreditRate(FrappeTestCase):
 		A zero would render as "free" and the app would grant credits for nothing.
 		The absence is reported as data so the APP writes the refusal sentence.
 		"""
-		rate = api.get_credit_rate(channel=self.CHANNEL, currency="CAD")
+		rate = api.get_credit_rate(channel=self.CHANNEL, currency=site_currency())
 
 		self.assertEqual(rate["source"], "unconfigured")
 		self.assertEqual(rate["price_per_unit_micros"], 0)
@@ -87,7 +93,7 @@ class TestCreditRate(FrappeTestCase):
 	def test_returns_the_channel_default_when_no_country_matches(self):
 		self.make_rate(1_000_000)
 
-		rate = api.get_credit_rate(channel=self.CHANNEL, currency="CAD")
+		rate = api.get_credit_rate(channel=self.CHANNEL, currency=site_currency())
 
 		self.assertEqual(rate["source"], "channel_default")
 		self.assertEqual(rate["price_per_unit_micros"], 1_000_000)
@@ -103,7 +109,7 @@ class TestCreditRate(FrappeTestCase):
 		self.make_rate(9_000_000, country_code=self.COUNTRY)
 
 		rate = api.get_credit_rate(
-			channel=self.CHANNEL, currency="CAD", destination="+233241234567"
+			channel=self.CHANNEL, currency=site_currency(), destination="+233241234567"
 		)
 
 		self.assertEqual(rate["source"], "exact_country")
@@ -115,7 +121,7 @@ class TestCreditRate(FrappeTestCase):
 		self.make_rate(9_000_000, country_code=self.COUNTRY)
 
 		rate = api.get_credit_rate(
-			channel=self.CHANNEL, currency="CAD", destination="+14165550123"
+			channel=self.CHANNEL, currency=site_currency(), destination="+14165550123"
 		)
 
 		self.assertEqual(rate["source"], "channel_default")
@@ -124,7 +130,7 @@ class TestCreditRate(FrappeTestCase):
 	def test_an_inactive_rate_is_not_a_rate(self):
 		self.make_rate(1_000_000, is_active=0)
 
-		rate = api.get_credit_rate(channel=self.CHANNEL, currency="CAD")
+		rate = api.get_credit_rate(channel=self.CHANNEL, currency=site_currency())
 
 		self.assertEqual(rate["source"], "unconfigured")
 
@@ -136,7 +142,7 @@ class TestCreditRate(FrappeTestCase):
 		)
 
 		rate = api.get_credit_rate(
-			channel=self.CHANNEL, currency="CAD", destination="+233241234567"
+			channel=self.CHANNEL, currency=site_currency(), destination="+233241234567"
 		)
 
 		self.assertEqual(rate["source"], "channel_default")
@@ -155,7 +161,7 @@ class TestCreditRate(FrappeTestCase):
 		)
 
 		rate = api.get_credit_rate(
-			channel=self.CHANNEL, currency="CAD", destination="+233241234567"
+			channel=self.CHANNEL, currency=site_currency(), destination="+233241234567"
 		)
 
 		self.assertEqual(rate["source"], "channel_default")
@@ -171,7 +177,7 @@ class TestCreditRate(FrappeTestCase):
 		self.assertEqual(doc.country_code, self.COUNTRY)
 
 		rate = api.get_credit_rate(
-			channel=self.CHANNEL, currency="CAD", destination="+233241234567"
+			channel=self.CHANNEL, currency=site_currency(), destination="+233241234567"
 		)
 		self.assertEqual(rate["source"], "exact_country")
 
@@ -210,6 +216,143 @@ class TestCreditRate(FrappeTestCase):
 		self.make_rate(1_000_000, effective_from=add_days(now_datetime(), -10))
 		self.make_rate(2_000_000, effective_from=add_days(now_datetime(), -1))
 
-		rate = api.get_credit_rate(channel=self.CHANNEL, currency="CAD")
+		rate = api.get_credit_rate(channel=self.CHANNEL, currency=site_currency())
 
 		self.assertEqual(rate["price_per_unit_micros"], 2_000_000)
+
+
+class TestProviderBuyingRate(FrappeTestCase):
+	"""
+	The buying rate is INTERNAL cost, separate from the selling rate.
+
+	It must resolve per selling company/provider/destination and report an absent
+	rate rather than a zero that would silently improve margin.
+	"""
+
+	CHANNEL = "sms"
+	COUNTRY = "+233"
+
+	def setUp(self):
+		super().setUp()
+		self.company = frappe.db.get_value("Company", {}, "name")
+		if not self.company:
+			self.skipTest("a Company is required for a buying-rate test")
+		self.currency = frappe.db.get_value("Company", self.company, "default_currency")
+		frappe.db.delete("Rest Credit Buying Rate", {"channel": self.CHANNEL})
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.db.delete("Rest Credit Buying Rate", {"channel": self.CHANNEL})
+		frappe.db.commit()
+		super().tearDown()
+
+	def make_rate(self, price, provider="nalo", country_code=None, **overrides):
+		values = {
+			"doctype": "Rest Credit Buying Rate",
+			"company": self.company,
+			"provider": provider,
+			"channel": self.CHANNEL,
+			"currency": self.currency,
+			"price_per_unit_micros": price,
+			"destination_country_code": country_code,
+			"effective_from": now_datetime(),
+			"is_active": 1,
+		}
+		values.update(overrides)
+		doc = frappe.get_doc(values)
+		doc.insert(ignore_permissions=True)
+		return doc
+
+	def test_reports_unconfigured_rather_than_zero(self):
+		cost = api.get_provider_cost(
+			company=self.company,
+			provider="nalo",
+			channel=self.CHANNEL,
+			currency=self.currency,
+			destination="+233241234567",
+		)
+
+		self.assertEqual(cost["source"], "unconfigured")
+		self.assertEqual(cost["price_per_unit_micros"], 0)
+		self.assertIsNone(cost["cost_rate_name"])
+
+	def test_exact_destination_beats_the_provider_default(self):
+		self.make_rate(40_000)
+		self.make_rate(20_000, country_code=self.COUNTRY)
+
+		cost = api.get_provider_cost(
+			company=self.company,
+			provider="nalo",
+			channel=self.CHANNEL,
+			currency=self.currency,
+			destination="+233241234567",
+		)
+
+		self.assertEqual(cost["source"], "exact_country")
+		self.assertEqual(cost["price_per_unit_micros"], 20_000)
+
+	def test_a_buying_rate_in_the_wrong_currency_is_refused(self):
+		wrong = "USD" if (self.currency or "").upper() != "USD" else "EUR"
+
+		with self.assertRaises(frappe.ValidationError):
+			self.make_rate(40_000, currency=wrong)
+
+
+class TestBillingRegion(FrappeTestCase):
+	"""
+	Country -> selling company, with NO default fallback.
+
+	The app never gets to choose a company. These pin the mapping helper the
+	quote/proposal/checkout paths all use, including the refusal for a country
+	nobody mapped.
+	"""
+
+	COUNTRY = "Canada"
+
+	def setUp(self):
+		super().setUp()
+		from brchms.brchms_credits import billing
+
+		self.billing = billing
+		self.company = frappe.db.get_value("Company", {}, "name")
+		if not self.company:
+			self.skipTest("a Company is required for a billing-region test")
+		self.currency = frappe.db.get_value("Company", self.company, "default_currency")
+		for name in frappe.get_all(
+			"Rest Credit Billing Region", filters={"country": self.COUNTRY}, pluck="name"
+		):
+			frappe.delete_doc("Rest Credit Billing Region", name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def tearDown(self):
+		for name in frappe.get_all(
+			"Rest Credit Billing Region", filters={"country": self.COUNTRY}, pluck="name"
+		):
+			frappe.delete_doc("Rest Credit Billing Region", name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		super().tearDown()
+
+	def test_a_mapped_country_resolves_to_its_company_and_currency(self):
+		region = frappe.get_doc(
+			{
+				"doctype": "Rest Credit Billing Region",
+				"region_name": "Test North America",
+				"country": self.COUNTRY,
+				"company": self.company,
+				"is_active": 1,
+			}
+		)
+		region.flags.ignore_permissions = True
+		region.insert()
+
+		context = self.billing.resolve_billing_context("CA")
+
+		self.assertEqual(context["company"], self.company)
+		self.assertEqual(context["currency"], self.currency)
+		self.assertTrue(context["ready"])
+
+	def test_an_unmapped_country_is_refused_rather_than_defaulted(self):
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self.billing.resolve_billing_context("TG")
+
+		self.assertIn("billing region", str(caught.exception).lower())

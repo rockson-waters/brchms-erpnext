@@ -9,6 +9,7 @@
  "engine": "InnoDB",
  "field_order": [
   "channel",
+  "company",
   "unit",
   "column_break_1",
   "price_per_unit_micros",
@@ -34,6 +35,16 @@
    "reqd": 1
   },
   {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "reqd": 0,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "The selling entity this rate belongs to. A rate from another company is never eligible."
+  },
+  {
    "description": "What one unit of this channel is billed as. Defaults to the channel's own unit; a rate card that charged SMS in 'email messages' would be a unit error nobody could see from the price alone.",
    "fieldname": "unit",
    "fieldtype": "Select",
@@ -47,7 +58,7 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "The price of ONE unit, in millionths of a major unit. Read the natural price beside it: 45000 means GHS 0.045 per unit, 50000 means GHS 0.05, 1000000 means GHS 1.00. It is an integer on purpose — money is stored in exact integers so no float ever touches a price — and the display field next to it is computed from it.",
+   "description": "The price of ONE unit, in millionths of a major unit. Read the natural price beside it: 45000 means GHS 0.045 per unit, 50000 means GHS 0.05, 1000000 means GHS 1.00. It is an integer on purpose \u2014 money is stored in exact integers so no float ever touches a price \u2014 and the display field next to it is computed from it.",
    "fieldname": "price_per_unit_micros",
    "fieldtype": "Long Int",
    "in_list_view": 1,
@@ -61,7 +72,7 @@
    "label": "Price per Unit",
    "read_only": 1,
    "in_list_view": 1,
-   "description": "What one unit costs, in the rate's currency — for example GHS 0.045. Computed from the micros value; this is the price a person reads."
+   "description": "What one unit costs, in the rate's currency \u2014 for example GHS 0.045. Computed from the micros value; this is the price a person reads."
   },
   {
    "description": "The currency this price is quoted in. A price and a currency are one fact: an amount with no currency is not a price.",
@@ -122,7 +133,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-13 00:00:00.000000",
+ "modified": "2026-10-19 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Brchms Credits",
  "name": "Rest Credit Rate",

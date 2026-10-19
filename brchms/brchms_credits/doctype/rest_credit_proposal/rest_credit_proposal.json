@@ -26,6 +26,8 @@
   "column_break_money",
   "amount_minor",
   "currency",
+  "company",
+  "billing_country",
   "unit_price_micros",
   "section_break_settlement",
   "payment_doctype",
@@ -174,6 +176,23 @@
    "reqd": 1
   },
   {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "in_standard_filter": 1,
+   "read_only": 1,
+   "description": "The selling entity resolved from the organization's billing country. Invoices, payment pages and rate prices belong to this company."
+  },
+  {
+   "fieldname": "billing_country",
+   "fieldtype": "Link",
+   "label": "Billing Country",
+   "options": "Country",
+   "read_only": 1,
+   "description": "The organization's billing jurisdiction at the time this proposal was raised."
+  },
+  {
    "fieldname": "unit_price_micros",
    "fieldtype": "Long Int",
    "label": "Unit Price (micros)",
@@ -193,7 +212,7 @@
    "label": "Payment Document Type",
    "options": "DocType",
    "depends_on": "docstatus==1",
-   "description": "What kind of document records the payment: \"Payment Entry\" for the ordinary case, or a gateway-managed doctype. It must be a real Frappe document type, because submitting is the moment this becomes a claim on real credit and the document IS the evidence — see _require_evidence_of_payment."
+   "description": "What kind of document records the payment: \"Payment Entry\" for the ordinary case, or a gateway-managed doctype. It must be a real Frappe document type, because submitting is the moment this becomes a claim on real credit and the document IS the evidence \u2014 see _require_evidence_of_payment."
   },
   {
    "fieldname": "payment_document",
@@ -266,7 +285,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-13 00:00:00.000000",
+ "modified": "2026-10-19 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Brchms Credits",
  "name": "Rest Credit Proposal",

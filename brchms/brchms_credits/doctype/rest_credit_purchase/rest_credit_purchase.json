@@ -12,6 +12,7 @@
   "column_break_1",
   "invoice",
   "proposal",
+  "company",
   "purchase_reference",
   "section_break_buyer",
   "buyer_name",
@@ -55,6 +56,15 @@
    "label": "Credit Proposal",
    "options": "Rest Credit Proposal",
    "read_only": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "The selling entity resolved from the organization's billing country. Set by checkout; the form does not choose it."
   },
   {
    "description": "The Rest purchase reference, carried through to the invoice so a payment can be matched back to the deployment that asked for it.",
@@ -144,7 +154,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-17 00:00:00.000000",
+ "modified": "2026-10-19 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Brchms Credits",
  "name": "Rest Credit Purchase",

@@ -4,6 +4,9 @@
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import cstr
+
+from brchms.brchms_credits import billing
 
 MIN_MICROS = 1
 MAX_MICROS = 10**15
@@ -43,11 +46,34 @@ class RestCreditRate(Document):
 				)
 			)
 
+		# A rate belongs to a selling company. Single-company sites keep their legacy
+		# implicit default; a multi-company site must name one, and the currency has
+		# to be that company's own. The app never sees a cross-company price.
+		company = cstr(self.company).strip() or None
+		if company and not frappe.db.exists("Company", company):
+			frappe.throw(_("Company {0} does not exist.").format(frappe.utils.escape_html(company)))
+		if not company:
+			company = billing.resolve_selling_company()
+		self.company = company
+
 		if not self.currency:
 			frappe.throw(
 				_(
 					"A rate needs a currency. An amount with no currency is not a price, and the "
 					"app cannot quote a purchase against it."
+				)
+			)
+		self.currency = cstr(self.currency).strip().upper()
+		company_currency = cstr(frappe.db.get_value("Company", self.company, "default_currency")).upper()
+		if company_currency and self.currency != company_currency:
+			frappe.throw(
+				_(
+					"{0} keeps its books in {1}, so a rate in {2} would be a cross-currency price "
+					"that nobody quoted. Set the rate in the selling company's own currency."
+				).format(
+					frappe.utils.escape_html(self.company),
+					frappe.utils.escape_html(company_currency),
+					frappe.utils.escape_html(self.currency),
 				)
 			)
 
@@ -175,14 +201,14 @@ class RestCreditRate(Document):
 		# rows and stopped protecting anything. A proposal carries the price it
 		# was quoted at (`unit_price_micros`), which is the fact that matters:
 		# editing a rate a proposal was quoted from would rewrite history.
-		quoted = frappe.db.count(
-			"Rest Credit Proposal",
-			{
-				"channel": before.channel,
-				"currency": before.currency,
-				"unit_price_micros": int(before.price_per_unit_micros or 0),
-			},
-		)
+		filters = {
+			"channel": before.channel,
+			"currency": before.currency,
+			"unit_price_micros": int(before.price_per_unit_micros or 0),
+		}
+		if cstr(before.company).strip():
+			filters["company"] = before.company
+		quoted = frappe.db.count("Rest Credit Proposal", filters)
 
 		if quoted:
 			frappe.throw(

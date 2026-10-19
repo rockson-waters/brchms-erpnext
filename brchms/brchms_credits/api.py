@@ -31,6 +31,8 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, now_datetime, nowdate
 
+from brchms.brchms_credits import billing
+
 INSTANCE_DOCTYPE = "Rest Instance"
 
 
@@ -115,11 +117,228 @@ def _touch_instance(instance_id, display_name=None, erpnext_site=None):
 
 
 RATE_DOCTYPE = "Rest Credit Rate"
+BUYING_RATE_DOCTYPE = "Rest Credit Buying Rate"
 CHANNEL_UNITS = {"sms": "sms_segment", "email": "email_message"}
+PROVIDER_CHANNELS = {"nalo": "sms", "twilio": "sms", "smtp": "email"}
 
 
 @frappe.whitelist()
-def get_credit_rate(channel=None, currency=None, destination=None, at=None):
+def get_provider_cost(
+	company=None, provider=None, channel=None, destination=None, at=None, country_code=None, currency=None
+):
+	"""
+	What the selling company pays the provider for one unit, for margin tracking.
+
+	This is INTERNAL integration data: it is scoped to the selling company and
+	never returned to the public purchase form or a customer UI. The app snapshots
+	it on each delivery, so a later rate change does not rewrite the cost of a
+	message already sent.
+	"""
+	channel = cstr(channel).strip().lower()
+	provider = cstr(provider).strip().lower()
+	if channel not in CHANNEL_UNITS:
+		frappe.throw(_("Channel must be 'sms' or 'email'."), frappe.ValidationError)
+	if provider not in PROVIDER_CHANNELS:
+		frappe.throw(_("Provider must be nalo, twilio or smtp."), frappe.ValidationError)
+	if PROVIDER_CHANNELS[provider] != channel:
+		frappe.throw(
+			_("{0} is not an {1} provider.").format(
+				frappe.utils.escape_html(provider), frappe.utils.escape_html(channel)
+			),
+			frappe.ValidationError,
+		)
+
+	company = billing.resolve_selling_company(company=company, currency=currency)
+	currency = cstr(frappe.db.get_value("Company", company, "default_currency")).upper()
+	moment = cstr(at) if at else str(now_datetime())
+	country = _buying_country_code(company, provider, channel, destination, country_code)
+
+	base = {
+		"company": company,
+		"provider": provider,
+		"channel": channel,
+		"unit": CHANNEL_UNITS[channel],
+		"currency": currency,
+		"country_code": country,
+		"price_per_unit_micros": 0,
+		"supplier_company": None,
+		"cost_rate_name": None,
+		"effective_from": None,
+		"effective_to": None,
+		"resolved_at": str(now_datetime()),
+		"source": "unconfigured",
+	}
+
+	rows = _active_buying_rates(company, provider, channel, moment)
+	if country:
+		for row in rows:
+			if cstr(row.destination_country_code).strip() == country:
+				return _as_provider_cost(row, base, "exact_country")
+	for row in rows:
+		if not cstr(row.destination_country_code).strip():
+			return _as_provider_cost(row, base, "channel_default")
+	return base
+
+
+def _active_buying_rates(company, provider, channel, moment):
+	rows = frappe.get_all(
+		BUYING_RATE_DOCTYPE,
+		filters={
+			"company": company,
+			"provider": provider,
+			"channel": channel,
+			"is_active": 1,
+			"effective_from": ("<=", moment),
+		},
+		fields=[
+			"name",
+			"price_per_unit_micros",
+			"currency",
+			"destination_country_code",
+			"supplier_company",
+			"effective_from",
+			"effective_to",
+		],
+		order_by="effective_from desc, creation desc",
+		limit_page_length=0,
+	)
+	return [
+		row for row in rows if not row.effective_to or cstr(row.effective_to)[:10] >= moment[:10]
+	]
+
+
+def _as_provider_cost(row, base, source):
+	return {
+		**base,
+		"price_per_unit_micros": int(row.price_per_unit_micros),
+		"currency": cstr(row.currency or base["currency"]).upper(),
+		"country_code": cstr(row.destination_country_code).strip() or base["country_code"],
+		"supplier_company": cstr(row.supplier_company).strip() or base["company"],
+		"cost_rate_name": row.name,
+		"effective_from": cstr(row.effective_from) if row.effective_from else None,
+		"effective_to": cstr(row.effective_to) if row.effective_to else None,
+		"source": source,
+	}
+
+
+def _buying_country_code(company, provider, channel, destination, country_code):
+	explicit = cstr(country_code).strip()
+	if explicit:
+		try:
+			from brchms.brchms_credits.doctype.rest_credit_buying_rate.rest_credit_buying_rate import (
+				normalize_prefix,
+			)
+
+			return normalize_prefix(explicit)
+		except Exception:
+			frappe.throw(_("Country Code must be a dialling code such as +233."), frappe.ValidationError)
+
+	number = cstr(destination).strip().replace(" ", "").replace("-", "")
+	if not number:
+		return None
+	if not number.startswith("+"):
+		number = "+" + number
+	codes = frappe.get_all(
+		BUYING_RATE_DOCTYPE,
+		filters={
+			"company": company,
+			"provider": provider,
+			"channel": channel,
+			"destination_country_code": ("is", "set"),
+		},
+		pluck="destination_country_code",
+		limit_page_length=0,
+	)
+	best = None
+	for code in set(codes):
+		candidate = cstr(code).strip()
+		if candidate and number.startswith(candidate) and (best is None or len(candidate) > len(best)):
+			best = candidate
+	return best
+
+
+@frappe.whitelist()
+def billing_preflight():
+	"""
+	Read-only readiness report for multi-company credit billing.
+
+	An operator runs this before switching purchases on: it lists the company
+	currencies, the country mappings, and every row/mapping that still needs a
+	decision. It never guesses a mapping and never writes.
+	"""
+	companies = frappe.get_all(
+		"Company",
+		fields=["name", "default_currency", "abbr"],
+		order_by="name asc",
+		limit_page_length=0,
+	)
+	regions = frappe.get_all(
+		"Rest Credit Billing Region",
+		fields=["name", "region_name", "country", "company", "currency", "is_active"],
+		order_by="country asc",
+		limit_page_length=0,
+	)
+	rates = frappe.get_all(
+		"Rest Credit Rate",
+		fields=["name", "company", "channel", "currency", "country_code", "is_active"],
+		order_by="company asc, channel asc",
+		limit_page_length=0,
+	)
+	buying_rates = frappe.get_all(
+		"Rest Credit Buying Rate",
+		fields=["name", "company", "provider", "channel", "currency", "destination_country_code", "is_active"],
+		order_by="company asc, provider asc",
+		limit_page_length=0,
+	)
+
+	def missing_company(doctype):
+		if not frappe.db.has_column(doctype, "company"):
+			return None
+		return frappe.db.sql(
+			"SELECT COUNT(*) FROM `tab{0}` WHERE company IS NULL OR company = ''".format(doctype)
+		)[0][0]
+
+	missing_regions = [row.name for row in regions if row.is_active and not row.company]
+	rate_gaps = [row.name for row in rates if not row.company or not row.currency]
+	org_missing = frappe.db.sql(
+		"SELECT COUNT(*) FROM `tabRest Credit Organization` "
+		"WHERE billing_company IS NULL OR billing_company = ''"
+	)[0][0] if frappe.db.has_column("Rest Credit Organization", "billing_company") else None
+
+	gateways = []
+	try:
+		gateways = frappe.get_all(
+			"Payment Gateway Account",
+			fields=["name", "company", "payment_gateway"],
+			limit_page_length=0,
+		)
+	except Exception:
+		# A site without the gateway app can still run the rest of the preflight.
+		pass
+
+	return {
+		"companies": companies,
+		"regions": regions,
+		"rates": rates,
+		"buying_rates": buying_rates,
+		"gateway_accounts": gateways,
+		"gaps": {
+			"active_regions_without_company": missing_regions,
+			"rates_without_company_or_currency": rate_gaps,
+			"proposals_without_company": missing_company("Rest Credit Proposal"),
+			"purchases_without_company": missing_company("Rest Credit Purchase"),
+			"organizations_without_billing_company": org_missing,
+			"active_regions": sum(1 for row in regions if row.is_active),
+			"active_buying_rates": sum(1 for row in buying_rates if row.is_active),
+		},
+		"ready": bool([row for row in regions if row.is_active]) and not missing_regions and not rate_gaps,
+	}
+
+
+@frappe.whitelist()
+def get_credit_rate(
+	channel=None, currency=None, destination=None, at=None, company=None, organization_id=None, country_code=None
+):
 	"""
 	The price of one service unit, in millionths of a major unit.
 
@@ -162,15 +381,35 @@ def get_credit_rate(channel=None, currency=None, destination=None, at=None):
 	Without it a later rate change leaves a quoted purchase unattributable, and
 	"priced once, never re-priced" stops being checkable.
 	"""
+	# The company is resolved BEFORE the currency is defaulted: a multi-company
+	# site must not silently quote the site default's price to another company.
+	company = billing.resolve_selling_company(
+		company=company, country_code=country_code, currency=currency
+	)
+	company_currency = cstr(frappe.db.get_value("Company", company, "default_currency")).upper()
+	currency = cstr(currency).strip().upper() if currency else company_currency
+	if currency != company_currency:
+		frappe.throw(
+			_(
+				"{0} keeps its books in {1}, not {2}; a rate in another currency would be a "
+				"cross-currency price nobody quoted."
+			).format(
+				frappe.utils.escape_html(company),
+				frappe.utils.escape_html(company_currency),
+				frappe.utils.escape_html(currency),
+			)
+		)
+
 	channel, currency = _require_rate_keys(channel, currency)
 	moment = cstr(at) if at else str(now_datetime())
-	country = _dialling_code(destination, channel) if channel == "sms" else None
+	country = _dialling_code(destination, channel, company) if channel == "sms" else None
 
 	base = {
 		"channel": channel,
 		"unit": CHANNEL_UNITS[channel],
 		"price_per_unit_micros": 0,
 		"currency": currency,
+		"company": company,
 		"country_code": country,
 		"rate_name": None,
 		"effective_from": None,
@@ -180,27 +419,33 @@ def get_credit_rate(channel=None, currency=None, destination=None, at=None):
 	}
 
 	if country:
-		for row in _active_rates(channel, moment):
+		for row in _active_rates(channel, moment, company):
 			if cstr(row.country_code) == country:
 				return _as_rate(row, base, "exact_country")
 
-	for row in _active_rates(channel, moment):
+	for row in _active_rates(channel, moment, company):
 		if not row.country_code:
 			return _as_rate(row, base, "channel_default")
 
 	return base
 
 
-def _active_rates(channel, moment):
-	"""Active rows for a channel whose window contains `moment`, newest first."""
+def _active_rates(channel, moment, company):
+	"""Active rows for a channel+company whose window contains `moment`, newest first."""
 	rows = frappe.get_all(
 		RATE_DOCTYPE,
-		filters={"channel": channel, "is_active": 1, "effective_from": ("<=", moment)},
+		filters={
+			"channel": channel,
+			"company": company,
+			"is_active": 1,
+			"effective_from": ("<=", moment),
+		},
 		fields=[
 			"name",
 			"unit",
 			"price_per_unit_micros",
 			"currency",
+			"company",
 			"country_code",
 			"effective_from",
 			"effective_to",
@@ -227,7 +472,7 @@ def _as_rate(row, base, source):
 	}
 
 
-def _dialling_code(destination, channel):
+def _dialling_code(destination, channel, company=None):
 	"""
 	The dialling code of a destination number, choosing among the codes ON FILE.
 
@@ -252,12 +497,10 @@ def _dialling_code(destination, channel):
 	if not number.startswith("+"):
 		number = "+" + number
 
-	codes = frappe.get_all(
-		RATE_DOCTYPE,
-		filters={"channel": channel, "country_code": ("is", "set")},
-		pluck="country_code",
-		limit_page_length=0,
-	)
+	filters = {"channel": channel, "country_code": ("is", "set")}
+	if company:
+		filters["company"] = company
+	codes = frappe.get_all(RATE_DOCTYPE, filters=filters, pluck="country_code", limit_page_length=0)
 
 	best = None
 	for code in set(codes):

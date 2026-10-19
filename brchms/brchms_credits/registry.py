@@ -55,6 +55,8 @@ import frappe
 from frappe import _
 from frappe.utils import cstr, now_datetime
 
+from brchms.brchms_credits import billing
+
 REGISTRY_DOCTYPE = "Rest Credit Organization"
 GROUP_CHILD_DOCTYPE = "Rest Credit Organization Group"
 INSTANCE_DOCTYPE = "Rest Instance"
@@ -76,6 +78,9 @@ def ensure_registration(
 	organization_name=None,
 	default_group_id=None,
 	default_group_name=None,
+	country_code=None,
+	currency=None,
+	require_billing=False,
 ):
 	"""
 	The registry row for (deployment, organization), created or refreshed.
@@ -87,6 +92,11 @@ def ensure_registration(
 	`default_group_*` is only filled, never cleared: a call that names no
 	default group (a proposal raise naming some other group) must not wipe the
 	one the purchase-link read registered.
+
+	`country_code`/`currency` update the organization's billing identity. If
+	`require_billing` is true (a proposal/purchase), an unmapped country or
+	currency mismatch raises; the purchase-link read passes false so the link can
+	still be reported as disabled with a reason instead of failing the credits page.
 	"""
 	instance_id = cstr(instance_id).strip()
 	organization_id = cstr(organization_id).strip()
@@ -125,6 +135,39 @@ def ensure_registration(
 	updates = {}
 	if organization_name and cstr(doc.organization_name).strip() != cstr(organization_name).strip():
 		updates["organization_name"] = cstr(organization_name).strip()
+
+	# Billing identity is DERIVED, never accepted as a company from the caller.
+	effective_country = cstr(country_code).strip() or cstr(doc.billing_country).strip()
+	if effective_country:
+		try:
+			context = billing.resolve_billing_context(
+				effective_country,
+				currency=currency or cstr(doc.billing_currency).strip() or None,
+				instance_id=instance_id,
+				organization_id=organization_id,
+			)
+		except Exception:
+			if require_billing:
+				raise
+			# Keep a RESOLVABLE country so the operator can see what needs
+			# mapping, but do not invent a company/currency. An unknown code is
+			# not written at all: a Link field would turn this into a raw Frappe
+			# link error instead of the billing message the caller needs.
+			try:
+				resolved_country = billing.country_name_for(effective_country)
+			except Exception:
+				resolved_country = None
+			if resolved_country and cstr(doc.billing_country).strip() != resolved_country:
+				updates["billing_country"] = resolved_country
+		else:
+			updates.update(
+				{
+					"billing_country": context["country"],
+					"billing_company": context["company"],
+					"billing_currency": context["currency"],
+					"billing_region": context["region"],
+				}
+			)
 	if default_group_id and not cstr(doc.default_group_id).strip():
 		updates["default_group_id"] = cstr(default_group_id).strip()
 		if default_group_name:
@@ -151,6 +194,9 @@ def ensure_group(
 	funding_group_id=None,
 	group_name=None,
 	organization_name=None,
+	country_code=None,
+	currency=None,
+	require_billing=False,
 ):
 	"""
 	The Customer a funding group's invoices are billed to, created once.
@@ -176,6 +222,9 @@ def ensure_group(
 		instance_id=instance_id,
 		organization_id=organization_id,
 		organization_name=organization_name,
+		country_code=country_code,
+		currency=currency,
+		require_billing=require_billing,
 	)
 
 	existing = _child(row, funding_group_id)

@@ -1,0 +1,162 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-10-19 00:00:00.000000",
+ "description": "What a selling company pays a provider per SMS segment/email, in its own currency, for management margin reporting. Actual provider bills are standard Purchase Invoices; this is not stock.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "provider",
+  "channel",
+  "destination_country_code",
+  "currency",
+  "unit",
+  "price_per_unit_micros",
+  "supplier",
+  "supplier_company",
+  "effective_from",
+  "effective_to",
+  "is_active",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Selling Company",
+   "options": "Company",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "The selling company whose management margin uses this buying cost. The supplier bill may sit in another legal entity."
+  },
+  {
+   "fieldname": "provider",
+   "fieldtype": "Select",
+   "label": "Provider",
+   "options": "nalo\ntwilio\nsmtp",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "channel",
+   "fieldtype": "Select",
+   "label": "Channel",
+   "options": "sms\nemail",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "destination_country_code",
+   "fieldtype": "Data",
+   "label": "Destination Country Code",
+   "in_list_view": 1,
+   "description": "Destination dialling code such as +233 or +1. Leave blank for the provider/channel default."
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Currency",
+   "options": "Currency",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "Must be the selling company's functional currency. This is a management/transfer cost, not the supplier invoice currency."
+  },
+  {
+   "fieldname": "unit",
+   "fieldtype": "Select",
+   "label": "Unit",
+   "options": "sms_segment\nemail_message",
+   "read_only": 1
+  },
+  {
+   "fieldname": "price_per_unit_micros",
+   "fieldtype": "BigInt",
+   "label": "Buying Price Per Unit (micros)",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "Provider cost per SMS segment/email in millionths of the selling company's currency."
+  },
+  {
+   "fieldname": "supplier",
+   "fieldtype": "Link",
+   "label": "Supplier",
+   "options": "Supplier",
+   "description": "The provider's Supplier record. The actual Purchase Invoice is raised in the paying company."
+  },
+  {
+   "fieldname": "supplier_company",
+   "fieldtype": "Link",
+   "label": "Supplier Company",
+   "options": "Company",
+   "description": "The legal entity that pays the supplier. Used to reconcile the management cost against actual Purchase Invoices."
+  },
+  {
+   "fieldname": "effective_from",
+   "fieldtype": "Date",
+   "label": "Effective From",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "effective_to",
+   "fieldtype": "Date",
+   "label": "Effective To",
+   "description": "Blank means until further notice."
+  },
+  {
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "label": "Is Active",
+   "default": "1",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-19 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Credits",
+ "name": "Rest Credit Buying Rate",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Rest Integration",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

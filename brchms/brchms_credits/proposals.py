@@ -52,7 +52,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, cint, cstr, now_datetime
 
-from brchms.brchms_credits import invoicing, registry
+from brchms.brchms_credits import billing, invoicing, registry
 
 PROPOSAL_DOCTYPE = "Rest Credit Proposal"
 INSTANCE_DOCTYPE = "Rest Instance"
@@ -95,6 +95,7 @@ def create_proposal(
 	instance_name=None,
 	buyer_email=None,
 	notes=None,
+	country_code=None,
 ):
 	"""
 	Raise a request to buy credits, or return the one already raised for this reference.
@@ -112,6 +113,7 @@ def create_proposal(
 	cannot bill) is refused loudly here, before anything exists to reconcile.
 	"""
 	request_key = cstr(request_key).strip() or None
+	country_code = cstr(country_code).strip().upper() or None
 
 	payload = {
 		"instance_id": cstr(instance_id).strip() or None,
@@ -130,6 +132,10 @@ def create_proposal(
 		# The deployment's own purchase id. Not a user-visible reference: it is the
 		# idempotency key, and it must be stable across the app's retries.
 		"request_key": request_key,
+		# Filled from the billing-region mapping below, never from a caller's
+		# choice of company.
+		"company": None,
+		"billing_country": None,
 	}
 
 	_missing = [f for f in REQUIRED_PROPOSAL_FIELDS if payload.get(f) in (None, "")]
@@ -163,19 +169,42 @@ def create_proposal(
 		payload["units"], payload["unit_price_micros"], payload["currency"], payload["amount_minor"]
 	)
 
-	# 2. The currency must be one this site can bill. A rate configured in a
-	#    currency the company does not keep would raise an invoice that fails
-	#    or silently misprices (the INR/USD incident), and refusing here means
-	#    the caller is told NOW, with the whole request still cheap to redo.
-	company_currency = _company_currency_if_any()
-	if company_currency and payload["currency"] != company_currency:
+	# 2. Resolve the SELLING COMPANY from the organization's billing country.
+	#    The caller may not choose a company or a currency independently: a
+	#    cheaper company would otherwise be one request parameter away. A
+	#    single-company site keeps its legacy implicit default; a multi-company
+	#    site without a mapped country is refused.
+	registration = registry.ensure_registration(
+		instance_id=payload["instance_id"],
+		organization_id=payload["organization_id"],
+		organization_name=payload["organization_name"],
+		country_code=country_code,
+		currency=payload["currency"],
+		require_billing=False,
+	)
+
+	effective_country = cstr(registration.billing_country).strip() or country_code
+	if effective_country:
+		context = billing.resolve_billing_context(
+			effective_country,
+			currency=payload["currency"],
+			instance_id=payload["instance_id"],
+			organization_id=payload["organization_id"],
+		)
+		payload["company"] = context["company"]
+		payload["billing_country"] = context["country"]
+	else:
+		payload["company"] = billing.resolve_selling_company(currency=payload["currency"])
+
+	company_currency = cstr(frappe.db.get_value("Company", payload["company"], "default_currency")).upper()
+	if cstr(payload["currency"]).upper() != company_currency:
 		frappe.throw(
 			_(
-				"This request is quoted in {0}, but this site's company keeps its books in {1}. "
-				"An invoice in the wrong currency is a silent mispricing, so it is refused rather "
-				"than raised. Set the rate card in the company's own currency and quote again."
+				"This request is quoted in {0}, but {1} keeps its books in {2}. An invoice in "
+				"the wrong currency is a silent mispricing, so it is refused rather than raised."
 			).format(
 				frappe.utils.escape_html(cstr(payload["currency"])),
+				frappe.utils.escape_html(payload["company"]),
 				frappe.utils.escape_html(company_currency),
 			),
 			frappe.ValidationError,
@@ -258,6 +287,9 @@ def ensure_page(doc):
 			funding_group_id=doc.funding_group_id,
 			group_name=doc.group_name,
 			organization_name=doc.organization_name,
+			country_code=doc.billing_country,
+			currency=doc.currency,
+			require_billing=bool(cstr(doc.billing_country).strip()),
 		)
 
 		invoice_name = invoicing.raise_credit_invoice(
@@ -269,6 +301,7 @@ def ensure_page(doc):
 			currency=doc.currency,
 			unit_price_micros=doc.unit_price_micros,
 			instance_id=doc.instance_id,
+			company=doc.company or _company_for_doc(doc),
 		)
 
 		# The invoice is recorded the moment it exists, BEFORE the payment page
@@ -309,22 +342,21 @@ def _ensure_page_quietly(doc):
 		)
 
 
-def _company_currency_if_any():
-	"""
-	The company's own currency, or None when there is no company to ask.
-
-	None rather than a refusal, because a site with no Company cannot bill
-	anything and the invoice raise will say so in its own words; this check
-	exists to catch the mismatch EARLY, not to duplicate the no-company error.
-	"""
-	company = invoicing.site_company()
-	if not company:
-		return None
-	return frappe.db.get_value("Company", company, "default_currency")
+def _company_for_doc(doc):
+	"""The selling company for a proposal, resolved from its stored billing country."""
+	country = cstr(doc.billing_country).strip()
+	if country:
+		return billing.resolve_billing_context(
+			country,
+			currency=doc.currency,
+			instance_id=doc.instance_id,
+			organization_id=doc.organization_id,
+		)["company"]
+	return billing.resolve_selling_company(currency=doc.currency)
 
 
 @frappe.whitelist(allow_guest=True)
-def quote(channel=None, units=None, currency=None):
+def quote(channel=None, units=None, currency=None, org=None, country_code=None):
 	"""
 	What a buyer pays for a number of credits, derived -- never typed.
 
@@ -333,8 +365,109 @@ def quote(channel=None, units=None, currency=None):
 	and the same rounding the invoice will enforce. A buyer cannot submit an
 	amount that disagrees with the price, because the amount field is filled
 	by this, not by them.
+
+	`org` is the registered organization slug from the purchase link. It is how
+	a public buyer is priced from THEIR billing region without ever naming a
+	company or currency. A public page must not be able to enumerate another
+	region's prices, so an unknown/missing org on a multi-company site is refused
+	rather than defaulted.
 	"""
-	return invoicing.quote(channel=channel, units=units, currency=currency)
+	company = None
+	row = registry.resolve(org) if cstr(org).strip() else None
+	if cstr(org).strip() and not row:
+		frappe.throw(
+			_("This purchase link's organization is not registered. Ask your church for a fresh link."),
+			frappe.ValidationError,
+		)
+	if row:
+		company = cstr(row.billing_company).strip() or None
+		if not currency and cstr(row.billing_currency).strip():
+			currency = row.billing_currency
+		if not company and cstr(row.billing_country).strip():
+			company = billing.resolve_billing_context(
+				row.billing_country, currency=currency
+			)["company"]
+	elif cstr(country_code).strip():
+		company = billing.resolve_billing_context(country_code, currency=currency)["company"]
+
+	return invoicing.quote(channel=channel, units=units, currency=currency, company=company)
+
+
+@frappe.whitelist()
+def get_billing_context(
+	instance_id=None,
+	organization_id=None,
+	organization_name=None,
+	country_code=None,
+	currency=None,
+):
+	"""
+	The selling company/currency for an organization, or why it has none.
+
+	Read-only and intentionally total: an unmapped country is returned as
+	`ready: false` with the missing mapping named, so the app can show a billing
+	blocker on the credits page instead of turning the whole page into an error.
+	"""
+	registration = registry.ensure_registration(
+		instance_id=instance_id,
+		organization_id=organization_id,
+		organization_name=organization_name,
+		country_code=country_code,
+		currency=currency,
+		require_billing=False,
+	)
+
+	effective_country = cstr(registration.billing_country).strip() or cstr(country_code).strip()
+	if effective_country:
+		ready, context, reason = billing.billing_is_ready(effective_country, currency=currency)
+		if ready:
+			return {
+				"ready": True,
+				"company": context["company"],
+				"currency": context["currency"],
+				"country": context["country"],
+				"country_code": context["country_code"],
+				"region": context["region"],
+				"region_name": context["region_name"],
+				"reason": None,
+			}
+		return {
+			"ready": False,
+			"company": None,
+			"currency": cstr(currency).strip().upper() or None,
+			"country": effective_country,
+			"country_code": cstr(country_code).strip().upper() or None,
+			"region": None,
+			"region_name": None,
+			"reason": reason,
+		}
+
+	# Legacy single-company sites may not have a billing country yet. Keep them
+	# working; a multi-company site is refused by resolve_selling_company.
+	try:
+		company = billing.resolve_selling_company(currency=currency)
+	except Exception as error:
+		return {
+			"ready": False,
+			"company": None,
+			"currency": cstr(currency).strip().upper() or None,
+			"country": None,
+			"country_code": None,
+			"region": None,
+			"region_name": None,
+			"reason": cstr(getattr(error, "message", None) or str(error)),
+		}
+
+	return {
+		"ready": True,
+		"company": company,
+		"currency": cstr(frappe.db.get_value("Company", company, "default_currency")).upper() or None,
+		"country": None,
+		"country_code": None,
+		"region": None,
+		"region_name": None,
+		"reason": None,
+	}
 
 
 @frappe.whitelist()
@@ -372,6 +505,8 @@ def list_settled_proposals(instance_id=None, since=None, limit=200):
 			"units",
 			"amount_minor",
 			"currency",
+			"company",
+			"billing_country",
 			"unit_price_micros",
 			"buyer_email",
 			"invoice",
@@ -760,6 +895,8 @@ def _proposal_response(doc, created=None):
 		"units": int(doc.units or 0),
 		"amount_minor": int(doc.amount_minor or 0),
 		"currency": doc.currency,
+		"company": cstr(doc.company) if doc.company else None,
+		"billing_country": cstr(doc.billing_country) if doc.billing_country else None,
 		"unit_price_micros": int(doc.unit_price_micros or 0),
 		"state": state,
 		# The one fact the app acts on. Submitted, and not past its deadline.
@@ -1038,6 +1175,8 @@ def get_purchase_link(
 	funding_group_id=None,
 	funding_group_name=None,
 	instance_id=None,
+	country_code=None,
+	currency=None,
 ):
 	"""
 	Where a customer goes to buy credits, and the customer-facing help text.
@@ -1105,6 +1244,7 @@ def get_purchase_link(
 	# Fail-open on purpose: the link is a convenience on a page whose real job is
 	# the ledger, and a registration problem must not take the button away.
 	registered = None
+	registration_error = None
 	if cstr(instance_id).strip() and cstr(organization_id).strip():
 		try:
 			registered = registry.ensure_registration(
@@ -1113,12 +1253,31 @@ def get_purchase_link(
 				organization_name=organization_name,
 				default_group_id=funding_group_id,
 				default_group_name=funding_group_name,
+				country_code=country_code,
+				currency=currency,
 			)
-		except Exception:
+		except Exception as error:
+			registration_error = cstr(getattr(error, "message", None) or str(error))
 			frappe.log_error(
 				title="brchms: could not register the organization behind the purchase link",
 				message=frappe.get_traceback(),
 			)
+
+	if registration_error:
+		# An attributed link MUST have a billing identity. Handing back a plain
+		# link would let a buyer reach a form whose quote can never resolve, so the
+		# button is withheld and the reason is available for the credits page.
+		return {
+			"enabled": False,
+			"reason": "The organization's purchase link could not be prepared: {0}".format(
+				registration_error
+			),
+			"organization_name": cstr(organization_name).strip() or None,
+			"organization_slug": None,
+			"organization_registered": False,
+			"billing_ready": False,
+			"billing_reason": registration_error,
+		}
 
 	reference = cstr(purchase_reference).strip()
 	param = cstr(settings.reference_param).strip()
@@ -1129,11 +1288,26 @@ def get_purchase_link(
 	if reference and param:
 		handoff_url = _append_param(handoff_url, param, reference)
 
+	billing_snapshot = _purchase_link_billing(registered, country_code, currency)
+	if registered and not billing_snapshot["billing_ready"]:
+		# A link with nowhere to bill is not a purchase button. Keep the
+		# configuration's URL available for diagnosis, but tell the app not to
+		# offer it until the region is mapped.
+		return {
+			"enabled": False,
+			"reason": billing_snapshot["billing_reason"],
+			**billing_snapshot,
+			"organization_name": cstr(registered.organization_name).strip() or None,
+			"organization_slug": cstr(registered.link_slug).strip() or None,
+			"organization_registered": True,
+		}
+
 	return {
 		"enabled": True,
 		"url": handoff_url,
 		"label": cstr(settings.link_label).strip() or "Buy credits",
 		"help_text": cstr(settings.help_text).strip() or None,
+		**billing_snapshot,
 		# True when the URL carries the purchase, so the app can say the reference is
 		# already attached rather than asking the customer for it again.
 		"identifies_purchase": bool(reference and param),
@@ -1146,6 +1320,68 @@ def get_purchase_link(
 		else (cstr(organization_name).strip() or None),
 		"organization_slug": cstr(registered.link_slug).strip() if registered else None,
 		"organization_registered": bool(registered),
+	}
+
+
+def _purchase_link_billing(registered, country_code=None, currency=None):
+	"""
+	The selling company/currency for an attributed purchase link, and whether the
+	link can currently be paid.
+
+	Legacy single-company sites with no billing country keep working through the
+	single-company fallback; a multi-company site with no region is not "ready"
+	and the app hides the button rather than quoting the site default's price.
+	"""
+	empty = {
+		"billing_company": None,
+		"billing_currency": None,
+		"billing_region": None,
+		"billing_country": None,
+		"billing_ready": False,
+		"billing_reason": None,
+	}
+	if not registered:
+		return {**empty, "billing_reason": "the organization was not registered"}
+
+	country = cstr(registered.billing_country).strip() or cstr(country_code).strip()
+	requested_currency = cstr(currency).strip().upper() or cstr(registered.billing_currency).strip() or None
+
+	if cstr(registered.billing_company).strip():
+		return {
+			"billing_company": registered.billing_company,
+			"billing_currency": cstr(registered.billing_currency).strip().upper() or None,
+			"billing_region": registered.billing_region,
+			"billing_country": registered.billing_country,
+			"billing_ready": True,
+			"billing_reason": None,
+		}
+
+	if country:
+		ready, context, reason = billing.billing_is_ready(country, currency=requested_currency)
+		if ready:
+			return {
+				"billing_company": context["company"],
+				"billing_currency": context["currency"],
+				"billing_region": context["region"],
+				"billing_country": context["country"],
+				"billing_ready": True,
+				"billing_reason": None,
+			}
+		return {**empty, "billing_country": country, "billing_reason": reason}
+
+	try:
+		company = billing.resolve_selling_company(currency=requested_currency)
+	except Exception as error:
+		return {
+			**empty,
+			"billing_reason": cstr(getattr(error, "message", None) or str(error)),
+		}
+
+	return {
+		**empty,
+		"billing_company": company,
+		"billing_currency": cstr(frappe.db.get_value("Company", company, "default_currency")).upper() or None,
+		"billing_ready": True,
 	}
 
 

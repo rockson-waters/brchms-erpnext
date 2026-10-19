@@ -89,6 +89,26 @@ class RestCreditProposal(Document):
 		if not self.currency:
 			frappe.throw(_("A proposal is quoted in a currency, and none was named."))
 
+		# When the proposal knows its selling company, its currency must be that
+		# company's own. Legacy rows (no company) are left to the single-company
+		# migration rather than refused retroactively.
+		if cstr(self.company).strip():
+			company_currency = cstr(
+				frappe.db.get_value("Company", self.company, "default_currency")
+			).upper()
+			if company_currency and cstr(self.currency).strip().upper() != company_currency:
+				frappe.throw(
+					_(
+						"Proposal {0} is in {1}, but {2} keeps its books in {3}. A cross-currency "
+						"settlement would make the two ledgers disagree."
+					).format(
+						frappe.utils.escape_html(self.name or _("new")),
+						frappe.utils.escape_html(self.currency),
+						frappe.utils.escape_html(self.company),
+						frappe.utils.escape_html(company_currency),
+					)
+				)
+
 		# Integers throughout: `flt` is an IEEE double and silently rounded a
 		# 2^53-scale value earlier in this integration. This is money.
 		for fieldname, label in (

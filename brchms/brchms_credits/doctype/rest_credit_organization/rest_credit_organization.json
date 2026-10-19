@@ -12,6 +12,10 @@
   "instance_id",
   "organization_id",
   "organization_name",
+  "billing_country",
+  "billing_company",
+  "billing_currency",
+  "billing_region",
   "column_break_1",
   "customer_group",
   "default_group_id",
@@ -28,7 +32,7 @@
    "read_only": 1,
    "reqd": 1,
    "unique": 1,
-   "description": "The opaque token in an attributed purchase link — ?org=<slug>. Read-only and unique because it IS the document's name: a link that names two organizations would settle a payment against the wrong one. Generated once at registration and never edited."
+   "description": "The opaque token in an attributed purchase link \u2014 ?org=<slug>. Read-only and unique because it IS the document's name: a link that names two organizations would settle a payment against the wrong one. Generated once at registration and never edited."
   },
   {
    "fieldname": "instance_id",
@@ -60,6 +64,39 @@
    "description": "Display name, for the desk. An operator's rename in the app travels on the next registration; this field is filled from what the app sends and is never edited here."
   },
   {
+   "fieldname": "billing_country",
+   "fieldtype": "Link",
+   "label": "Billing Country",
+   "options": "Country",
+   "in_standard_filter": 1,
+   "description": "The organization's billing jurisdiction. It selects the selling company and currency from the billing-region map."
+  },
+  {
+   "fieldname": "billing_company",
+   "fieldtype": "Link",
+   "label": "Billing Company",
+   "options": "Company",
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "Resolved from Billing Country. The selling entity for every invoice from this organization."
+  },
+  {
+   "fieldname": "billing_currency",
+   "fieldtype": "Link",
+   "label": "Billing Currency",
+   "options": "Currency",
+   "read_only": 1,
+   "description": "The company's functional currency; credits for this organization are sold in it."
+  },
+  {
+   "fieldname": "billing_region",
+   "fieldtype": "Link",
+   "label": "Billing Region",
+   "options": "Rest Credit Billing Region",
+   "read_only": 1,
+   "description": "The country-to-company mapping used at registration."
+  },
+  {
    "fieldname": "column_break_1",
    "fieldtype": "Column Break"
   },
@@ -75,7 +112,7 @@
    "fieldtype": "Data",
    "label": "Default Funding Group Id",
    "length": 140,
-   "description": "The funding group a public-form purchase credits when the buyer arrived without one named — normally the organization's root group, sent by the app when it asks for the purchase link. Without this, a form purchase has nowhere to put its credits and is refused rather than guessed at."
+   "description": "The funding group a public-form purchase credits when the buyer arrived without one named \u2014 normally the organization's root group, sent by the app when it asks for the purchase link. Without this, a form purchase has nowhere to put its credits and is refused rather than guessed at."
   },
   {
    "fieldname": "default_group_name",
@@ -90,7 +127,7 @@
    "label": "Funding Groups"
   },
   {
-   "description": "One row per funding group that has ever bought credits. The Customer is the billing entity — credits belong to the group that pays for them, so the invoice names the group's Customer, not the organization's.",
+   "description": "One row per funding group that has ever bought credits. The Customer is the billing entity \u2014 credits belong to the group that pays for them, so the invoice names the group's Customer, not the organization's.",
    "fieldname": "groups",
    "fieldtype": "Table",
    "label": "Funding Groups",
@@ -99,7 +136,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-17 00:00:00.000000",
+ "modified": "2026-10-19 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Brchms Credits",
  "name": "Rest Credit Organization",

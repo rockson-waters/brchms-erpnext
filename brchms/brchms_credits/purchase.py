@@ -52,7 +52,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, flt
 
-from brchms.brchms_credits import invoicing, proposals, registry
+from brchms.brchms_credits import billing, invoicing, proposals, registry
 
 PURCHASE_DOCTYPE = "Rest Credit Purchase"
 PROPOSAL_DOCTYPE = "Rest Credit Proposal"
@@ -108,6 +108,7 @@ def checkout(purchase=None, org=None):
 			doc.db_set(
 				{
 					"status": "Invoiced" if proposal_doc.invoice else doc.status,
+					"company": proposal_doc.company,
 					**({"payment_url": page["payment_url"]} if page and page["payment_url"] else {}),
 				}
 			)
@@ -122,6 +123,8 @@ def checkout(purchase=None, org=None):
 				"invoice": proposal_doc.invoice,
 				"payment_url": page["payment_url"] if page else None,
 				"status": doc.status,
+				"company": proposal_doc.company,
+				"currency": proposal_doc.currency,
 			}
 
 		funding_group_id = cstr(registry_row.default_group_id).strip()
@@ -142,7 +145,15 @@ def checkout(purchase=None, org=None):
 		# re-derives the amount server-side from the same rate and refuses any
 		# mismatch. Defense in depth: this is what stops a crafted request
 		# from naming its own price for a million credits.
-		quoted = proposals.quote(channel=doc.channel, units=doc.units)
+		# The org slug is the whole region context: it resolves to ONE company
+		# and currency, and a caller cannot name another. `quote` also refuses an
+		# unregistered or region-less organization on a multi-company site.
+		quoted = proposals.quote(
+			channel=doc.channel,
+			units=doc.units,
+			org=slug,
+			currency=cstr(registry_row.billing_currency).strip() or None,
+		)
 		amount_minor = invoicing.minor_amount_for(
 			doc.units, quoted["unit_price_micros"], quoted["currency"]
 		)
@@ -181,6 +192,7 @@ def checkout(purchase=None, org=None):
 			unit_price_micros=quoted["unit_price_micros"],
 			instance_name=registry_row.organization_name,
 			buyer_email=doc.buyer_email,
+			country_code=registry_row.billing_country,
 		)
 
 		proposal_name = result["proposal"]
@@ -196,6 +208,7 @@ def checkout(purchase=None, org=None):
 		doc.db_set(
 			{
 				"proposal": proposal_name,
+				"company": proposal_doc.company,
 				# Truthful either way: the invoice exists or it does not, and a
 				# payment page is not the same fact as an invoice.
 				"status": "Invoiced" if proposal_doc.invoice else doc.status,
@@ -213,6 +226,8 @@ def checkout(purchase=None, org=None):
 			"invoice": proposal_doc.invoice,
 			"payment_url": page["payment_url"] if page else None,
 			"status": doc.status,
+			"company": proposal_doc.company,
+			"currency": proposal_doc.currency,
 		}
 	finally:
 		frappe.set_user(previous_user)
