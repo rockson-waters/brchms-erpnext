@@ -291,6 +291,21 @@ class TestProviderBuyingRate(FrappeTestCase):
 		self.assertEqual(cost["source"], "exact_country")
 		self.assertEqual(cost["price_per_unit_micros"], 20_000)
 
+	def test_the_channel_derives_the_unit_even_from_a_stale_form_default(self):
+		# The desk's read-only Unit Select opens on `sms_segment`. An email buying
+		# rate must not be refused just because that stale value is still in the
+		# submitted doc; the unit belongs to the channel.
+		doc = self.make_rate(
+			150_000,
+			provider="smtp",
+			channel="email",
+			unit="sms_segment",
+		)
+
+		self.assertEqual(doc.unit, "email_message")
+		frappe.delete_doc("Rest Credit Buying Rate", doc.name, force=True, ignore_permissions=True)
+
+
 	def test_a_buying_rate_in_the_wrong_currency_is_refused(self):
 		wrong = "USD" if (self.currency or "").upper() != "USD" else "EUR"
 

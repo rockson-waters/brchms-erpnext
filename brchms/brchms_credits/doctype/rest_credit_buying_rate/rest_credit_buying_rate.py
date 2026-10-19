@@ -24,15 +24,12 @@ class RestCreditBuyingRate(Document):
 
 		if self.channel not in CHANNEL_UNITS:
 			frappe.throw(_("Channel must be 'sms' or 'email', not '{0}'.").format(self.channel))
-		expected_unit = CHANNEL_UNITS[self.channel]
-		if not self.unit:
-			self.unit = expected_unit
-		elif self.unit != expected_unit:
-			frappe.throw(
-				_("{0} is bought in {1}, but this row says '{2}'.").format(
-					self.channel.upper(), expected_unit, self.unit
-				)
-			)
+		# The unit is DERIVED from the channel, never a second choice. The desk
+		# renders `unit` read-only, but a Select with no default still opens on its
+		# first option (`sms_segment`); changing Channel to email then left that
+		# stale value in the form and refused a perfectly valid email buying rate.
+		# Deriving here makes the field honest whatever the browser submitted.
+		self.unit = CHANNEL_UNITS[self.channel]
 
 		if self.provider not in ("nalo", "twilio", "smtp"):
 			frappe.throw(_("Provider must be nalo, twilio or smtp."))
