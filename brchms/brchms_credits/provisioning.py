@@ -577,16 +577,31 @@ function requote() {
 				 * set directly as well because the hidden `currency` field has no
 				 * rendered control on the public web form.
 				 */
+				var amount_field = frappe.web_form.fields_dict.amount;
 				if (r.message.currency) {
+					/*
+					 * Frappe resolves a Currency field's symbol through the
+					 * document's linked currency, falling back to the site
+					 * default. The public form's hidden `currency` control is not
+					 * rendered, so set every resolution path: the web-form doc,
+					 * the control's own doc, and the boot default the fallback
+					 * reads. Without the last one the amount still rendered "GHS"
+					 * while the billing notice correctly said "CAD".
+					 */
+					if (frappe.boot && frappe.boot.sysdefaults) {
+						frappe.boot.sysdefaults.currency = r.message.currency;
+					}
 					if (frappe.web_form.doc) {
 						frappe.web_form.doc.currency = r.message.currency;
+					}
+					if (amount_field && amount_field.doc) {
+						amount_field.doc.currency = r.message.currency;
 					}
 					if (frappe.web_form.fields_dict.currency) {
 						frappe.web_form.set_value("currency", r.message.currency);
 					}
 				}
 				frappe.web_form.set_value("amount", r.message.amount_major);
-				var amount_field = frappe.web_form.fields_dict.amount;
 				if (amount_field && amount_field.refresh) {
 					amount_field.refresh();
 				}
