@@ -275,7 +275,7 @@ def ensure_page(doc):
 	if doc.invoice:
 		return {
 			"invoice": doc.invoice,
-			"payment_url": doc.payment_url or invoicing.payment_url_for(doc.invoice),
+			"payment_url": invoicing.payment_url_for(doc.invoice, payer_email=doc.buyer_email),
 		}
 
 	previous_user = frappe.session.user
@@ -312,7 +312,7 @@ def ensure_page(doc):
 		doc.db_set({"invoice": invoice_name})
 		frappe.db.commit()
 
-		url = invoicing.payment_url_for(invoice_name)
+		url = invoicing.payment_url_for(invoice_name, payer_email=doc.buyer_email)
 		doc.db_set({"payment_url": url})
 		frappe.db.commit()
 

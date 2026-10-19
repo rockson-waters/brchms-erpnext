@@ -260,7 +260,7 @@ def raise_credit_invoice(
 	return invoice.name
 
 
-def payment_url_for(invoice_name):
+def payment_url_for(invoice_name, payer_email=None):
 	"""
 	Where this invoice can be paid, creating the gateway request if needed.
 
@@ -268,6 +268,12 @@ def payment_url_for(invoice_name):
 	the administrator identity -- the buyer is identified by their purchase
 	record, and the gateway page they are sent to is the system's choice
 	rather than theirs.
+
+	`payer_email` is the buyer's receipt address from the purchase record. It
+	MUST be supplied: without it ERPNext falls back to the owner of the invoice,
+	which is Administrator, and the gateway rejects the resulting payment page
+	with "Invalid email address: Administrator" -- a checkout that cannot be
+	paid even though the invoice and request are valid.
 	"""
 	from erpnext.accounts.doctype.payment_request.payment_request import make_payment_request
 
@@ -277,13 +283,20 @@ def payment_url_for(invoice_name):
 		"name",
 	)
 	if existing:
-		return frappe.get_doc("Payment Request", existing).get_payment_url()
+		request = frappe.get_doc("Payment Request", existing)
+		if payer_email and cstr(request.email_to).strip() != cstr(payer_email).strip():
+			request.db_set("email_to", cstr(payer_email).strip())
+			frappe.db.commit()
+		return request.get_payment_url()
 
 	request = make_payment_request(
 		dt=INVOICE_DOCTYPE,
 		dn=invoice_name,
 		submit_doc=True,
 		return_doc=True,
+		# Without an explicit recipient ERPNext uses the invoice owner
+		# (Administrator), which the gateway rejects as an invalid address.
+		recipient_id=cstr(payer_email).strip() or None,
 		# The buyer is being redirected to the gateway in the same breath, so the
 		# email ERPNext would otherwise send duplicates the page they are already
 		# looking at -- and it would make the whole purchase depend on a configured
