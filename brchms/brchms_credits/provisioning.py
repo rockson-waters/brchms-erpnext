@@ -569,15 +569,26 @@ function requote() {
 		args: { channel: channel, units: units, org: org },
 		callback: function (r) {
 			if (r && r.message) {
-				frappe.web_form.set_value("amount", r.message.amount_major);
 				/*
-				 * `currency` is a hidden field in the doctype; defensively set it
-				 * only when the form actually built a control for it. The amount
-				 * field is the important one, and the notice below names the
-				 * currency either way.
+				 * Apply the CURRENCY BEFORE the amount. Frappe's Currency control
+				 * formats the amount by reading the document's linked currency
+				 * field; setting the amount first made it render the site default
+				 * ("GHS 4.50") beside a notice that correctly said CAD. The doc is
+				 * set directly as well because the hidden `currency` field has no
+				 * rendered control on the public web form.
 				 */
-				if (frappe.web_form.fields_dict.currency) {
-					frappe.web_form.set_value("currency", r.message.currency);
+				if (r.message.currency) {
+					if (frappe.web_form.doc) {
+						frappe.web_form.doc.currency = r.message.currency;
+					}
+					if (frappe.web_form.fields_dict.currency) {
+						frappe.web_form.set_value("currency", r.message.currency);
+					}
+				}
+				frappe.web_form.set_value("amount", r.message.amount_major);
+				var amount_field = frappe.web_form.fields_dict.amount;
+				if (amount_field && amount_field.refresh) {
+					amount_field.refresh();
 				}
 				show_billing(r.message.company, r.message.currency);
 			}
