@@ -160,14 +160,19 @@ def ensure_registration(
 			if resolved_country and cstr(doc.billing_country).strip() != resolved_country:
 				updates["billing_country"] = resolved_country
 		else:
-			updates.update(
-				{
-					"billing_country": context["country"],
-					"billing_company": context["company"],
-					"billing_currency": context["currency"],
-					"billing_region": context["region"],
-				}
-			)
+			# Write only what CHANGED. Every credit page read asks for the billing
+			# context, and two such reads run concurrently on first paint; an
+			# unconditional save made both write the same row and MySQL answered
+			# one with 1020 "Record has changed since last read". Comparing first
+			# turns the steady state into a read-only registration read.
+			for fieldname, value in (
+				("billing_country", context["country"]),
+				("billing_company", context["company"]),
+				("billing_currency", context["currency"]),
+				("billing_region", context["region"]),
+			):
+				if cstr(doc.get(fieldname)).strip() != cstr(value).strip():
+					updates[fieldname] = value
 	if default_group_id and not cstr(doc.default_group_id).strip():
 		updates["default_group_id"] = cstr(default_group_id).strip()
 		if default_group_name:
