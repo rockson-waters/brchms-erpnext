@@ -76,11 +76,12 @@
   },
   {
    "fieldname": "price_per_unit_micros",
-   "fieldtype": "BigInt",
+   "fieldtype": "Long Int",
    "label": "Buying Price Per Unit (micros)",
    "reqd": 1,
    "in_list_view": 1,
-   "description": "Provider cost per SMS segment/email in millionths of the selling company's currency."
+   "description": "Provider cost per SMS segment/email in millionths of the selling company's currency.",
+   "non_negative": 1
   },
   {
    "fieldname": "supplier",
