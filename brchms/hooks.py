@@ -66,12 +66,25 @@ doc_events = {
     },
 }
 
-# Fixtures ship the two custom roles the app needs on a fresh site. Without them,
+# Fixtures ship the custom roles the app needs on a fresh site. Without them,
 # `install-app` on a new bench produces a site where the integration user cannot
 # be granted anything, and the first API call fails with a permission error that
 # says nothing about the missing role.
+#
+# `Rest Support Agent` is a HUMAN triage role, separate from `Rest Integration`
+# for the same reason `Rest Banner Manager` is: the long-lived credential the app
+# carries must not be able to rewrite a report after filing it.
 fixtures = [
-    {"dt": "Role", "filters": [["role_name", "in", ["Rest Integration", "Rest Banner Manager"]]]},
+    {
+        "dt": "Role",
+        "filters": [
+            [
+                "role_name",
+                "in",
+                ["Rest Integration", "Rest Banner Manager", "Rest Support Agent"],
+            ]
+        ],
+    },
 ]
 
 
@@ -106,4 +119,8 @@ after_migrate = [
     # a hook rather than a `fixtures/` entry — fixtures are only imported when an
     # operator asks, and the failure of a missing field surfaces on a live site.
     "brchms.brchms_credits.provisioning.after_migrate",
+    # A malfunction report's per-deployment idempotency key needs a real unique
+    # index; the doctype's `unique` flag alone constrains nothing, exactly as with
+    # the proposal's purchase reference.
+    "brchms.brchms_support.api.after_migrate",
 ]

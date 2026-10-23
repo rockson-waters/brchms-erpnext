@@ -20,9 +20,24 @@ RATE_DOCTYPE = "Rest Credit Rate"
 FIXTURE_NOTE = "LIVE-TEST-RATE-FIXTURE"
 
 
+def _require_system_manager():
+	"""
+	Only a System Manager may touch the rate card through these methods.
+
+	These endpoints insert and delete RATE rows with `ignore_permissions`, which
+	is pricing authority: without this check any authenticated caller -- including
+	the app's read-only integration credential -- could create a cheap rate or
+	DELETE a live one, and every subsequent quote would be priced from it. The
+	harness that uses these methods runs as an administrator; a production
+	credential never needs them.
+	"""
+	frappe.only_for("System Manager")
+
+
 @frappe.whitelist()
 def install():
 	"""Create the two rates the live harness asserts on."""
+	_require_system_manager()
 	remove()
 
 	now = now_datetime()
@@ -71,8 +86,10 @@ def remove():
 	Delete exactly the fixture rows.
 
 	Scoped by the marker note rather than by anything the caller passes, so this can
-	never be pointed at an operator's real rate.
+	never be pointed at an operator's real rate. Still System-Manager-only: the
+	scope prevents deleting a real rate, not using the endpoint at all.
 	"""
+	_require_system_manager()
 	names = frappe.get_all(RATE_DOCTYPE, filters={"notes": FIXTURE_NOTE}, pluck="name")
 	for name in names:
 		frappe.delete_doc(RATE_DOCTYPE, name, force=True, ignore_permissions=True)

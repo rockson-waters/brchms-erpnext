@@ -47,7 +47,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, flt
 
-from brchms.brchms_credits import billing
+from brchms.brchms_credits import billing, terms
 
 INVOICE_DOCTYPE = "Sales Invoice"
 
@@ -114,7 +114,7 @@ def require_consistent(units, unit_price_micros, currency, amount_minor):
 	return expected
 
 
-def quote(channel=None, units=None, currency=None, company=None):
+def quote(channel=None, units=None, currency=None, company=None, discount_basis_points=None):
 	"""
 	What a buyer pays for a number of credits, derived -- never typed.
 
@@ -123,6 +123,18 @@ def quote(channel=None, units=None, currency=None, company=None):
 	price is the CURRENT active rate for the channel, in the Company's own
 	currency, and the amount is `minor_amount_for` -- the same rounding the
 	invoice will enforce, so what the buyer sees is what they are billed.
+
+	`discount_basis_points` is the ORGANIZATION's discount, resolved from the
+	registry by the caller (`proposals.quote` for the public form). It is a
+	parameter here rather than a lookup because `invoicing` must stay usable
+	without an organization context (the invoice path receives the proposal's
+	snapshot). The effective price and the amount are DERIVED from
+	`(list, basis_points)` with the same half-up rule the app applies, so the
+	amount on the page is the amount the invoice will bill.
+
+	The answer carries the terms that decide whether the purchase may happen:
+	`below_minimum` is data, not a throw, because the public form shows a
+	sentence and the checkout is what refuses.
 	"""
 	channel = cstr(channel).strip().lower()
 	if channel not in CHANNEL_ITEMS:
@@ -141,18 +153,65 @@ def quote(channel=None, units=None, currency=None, company=None):
 	currency = cstr(currency).strip().upper() or company_default_currency(company)
 
 	rate = _current_rate(channel, currency, company)
-	amount_minor = minor_amount_for(units, rate["price_per_unit_micros"], currency)
+	list_micros = int(rate["price_per_unit_micros"])
+	basis_points = _basis_points(discount_basis_points)
+	effective_micros = terms.effective_unit_price_micros(list_micros, basis_points)
+
+	minimum_minor = terms.minimum_purchase_minor(currency)
+	list_amount_minor = minor_amount_for(units, list_micros, currency)
+	amount_minor = minor_amount_for(units, effective_micros, currency)
 
 	return {
 		"channel": channel,
 		"units": units,
 		"company": company,
 		"currency": currency,
-		"unit_price_micros": int(rate["price_per_unit_micros"]),
+		# The rate card's price, before the organization's discount.
+		"list_price_per_unit_micros": list_micros,
+		# The price this buyer actually pays. `unit_price_micros` is the name
+		# older callers read, and it is the EFFECTIVE (discounted) price.
+		"unit_price_micros": int(effective_micros),
+		"price_per_unit_micros": int(effective_micros),
+		"discount_basis_points": basis_points,
+		"discount_percent": round(basis_points / 100, 2),
+		# The money, before and after the discount. The proposal snapshots these,
+		# and a public form can show the saving without doing any arithmetic of
+		# its own (a browser that re-derives money is a second pricing engine).
+		"list_amount_minor": list_amount_minor,
+		"discount_minor": list_amount_minor - amount_minor,
+		"minimum_purchase_minor": minimum_minor,
+		"minimum_purchase_amount": terms.minimum_purchase_display(currency, minimum_minor),
+		"below_minimum": bool(minimum_minor) and amount_minor < minimum_minor,
+		"pricing_error": terms.pricing_error_for(list_micros, basis_points),
 		"rate_name": rate.get("rate_name"),
 		"amount_minor": amount_minor,
 		"amount_major": flt(amount_minor / currency_fraction_units(currency)),
 	}
+
+
+def _basis_points(value):
+	"""The caller's discount in basis points, refused rather than rounded."""
+	if value in (None, ""):
+		return 0
+	try:
+		basis_points = int(value)
+	except (TypeError, ValueError):
+		frappe.throw(
+			_("Discount must be a whole number of basis points, not '{0}'.").format(
+				frappe.utils.escape_html(cstr(value))
+			),
+			frappe.ValidationError,
+		)
+
+	if basis_points < 0 or basis_points > terms.MAX_BASIS_POINTS:
+		frappe.throw(
+			_(
+				"Discount must be between 0% and 99.99%; {0} basis points is not a price that "
+				"can be given."
+			).format(basis_points),
+			frappe.ValidationError,
+		)
+	return basis_points
 
 
 def raise_credit_invoice(
@@ -164,6 +223,8 @@ def raise_credit_invoice(
 	amount_minor,
 	currency,
 	unit_price_micros=None,
+	list_unit_price_micros=None,
+	discount_basis_points=None,
 	instance_id=None,
 	company=None,
 ):
@@ -183,8 +244,11 @@ def raise_credit_invoice(
 	`unit_price_micros` is the PROPOSAL'S OWN snapshot when the caller has
 	one -- priced once, never re-priced (a documented decision: a rate change
 	must not re-price a purchase already quoted, because that could strand a
-	payment that genuinely happened). The consistency backstop therefore
-	checks the triple against itself, not against the current rate card.
+	payment that genuinely happened). `list_unit_price_micros` and
+	`discount_basis_points` are the same snapshot's list price and discount:
+	the effective price is RE-DERIVED from them here, and the invoice line is
+	billed at that net rate. The consistency backstop therefore checks the
+	triple against itself, not against the current rate card.
 	"""
 	item_code = CHANNEL_ITEMS.get(cstr(channel).strip().lower())
 	if not item_code:
@@ -222,9 +286,61 @@ def raise_credit_invoice(
 
 	# The invariant holds at the last moment before money is asked for. Both
 	# doors derive the pair; this is the backstop for a hand-edited row.
-	require_consistent(units, unit_price_micros, currency, amount_minor)
+	#
+	# The discount is re-derived here rather than trusted: the invoice is the
+	# document money is collected against, so a row whose effective price does
+	# not come from its own `(list, basis_points)` is refused instead of
+	# billed. `require_consistent` then checks the NET amount (what the buyer
+	# actually pays) against the effective price.
+	list_micros = (
+		int(list_unit_price_micros)
+		if list_unit_price_micros not in (None, "")
+		else int(unit_price_micros or 0)
+	)
+	basis_points = _basis_points(discount_basis_points)
+	effective_micros = terms.effective_unit_price_micros(list_micros, basis_points)
+
+	if basis_points and list_micros <= 0:
+		frappe.throw(
+			_(
+				"This purchase claims a {0}% discount but records no list price to discount from."
+			).format(basis_points / 100),
+			frappe.ValidationError,
+		)
+
+	if unit_price_micros not in (None, "") and int(unit_price_micros) != effective_micros:
+		frappe.throw(
+			_(
+				"The price on this proposal disagrees with its own discount: {0} micros with a "
+				"{1}% discount comes to {2} micros, not {3}."
+			).format(list_micros, basis_points / 100, effective_micros, int(unit_price_micros)),
+			frappe.ValidationError,
+		)
+
+	pricing_error = terms.pricing_error_for(list_micros, basis_points)
+	if pricing_error:
+		frappe.throw(pricing_error, frappe.ValidationError)
+
+	require_consistent(units, effective_micros, currency, amount_minor)
 
 	fraction = currency_fraction_units(currency)
+
+	# The description names the list price and the discount because the invoice
+	# line is what a buyer and a reviewer compare against the rate card later.
+	# The DISCOUNT IS IN THE RATE (net price), not in ERPNext's discount
+	# machinery: `additional_discount_percentage` would make the invoice total
+	# disagree with the proposal's snapshot and with the app's own ledger, and
+	# pricing rules could silently re-price a credit item. One price, derived
+	# once.
+	description = _("{0} credits for {1}").format(
+		frappe.utils.escape_html(cstr(channel).upper()), cint(units)
+	)
+	if basis_points:
+		description = _("{0} (list price {1} per unit, {2}% discount)").format(
+			description,
+			format_micros(list_micros, currency),
+			(basis_points / 100),
+		)
 
 	invoice = frappe.get_doc(
 		{
@@ -243,9 +359,7 @@ def raise_credit_invoice(
 			"items": [
 				{
 					"item_code": item_code,
-					"description": _("{0} credits for {1}").format(
-						frappe.utils.escape_html(cstr(channel).upper()), cint(units)
-					),
+					"description": description,
 					"qty": 1,
 					"rate": flt(int(amount_minor) / fraction),
 				}
@@ -362,3 +476,25 @@ def format_minor(amount_minor, currency):
 		return "{0}".format(amount)
 	decimals = len(str(fraction - 1))
 	return "{0:.{1}f}".format(amount / fraction, decimals)
+
+
+def format_micros(micros, currency=None):
+	"""
+	A per-unit price in micros as a person reads it: 45000 -> "GHS 0.045".
+
+	Used on the invoice line to name the rate card's list price beside the
+	discount. Kept here (rather than imported from the rate controller) so the
+	invoice module has no dependency on a DocType module just to format a
+	number; the rule is the same, and the price that is BILLED is still the
+	integer in `rate`, never this string.
+	"""
+	micros = int(micros or 0)
+	whole, fraction = divmod(abs(micros), 1_000_000)
+	digits = "{0:06d}".format(fraction).rstrip("0")
+	if len(digits) < 2:
+		digits = digits.ljust(2, "0")
+	value = "{0}.{1}".format(whole, digits)
+	if micros < 0:
+		value = "-" + value
+	currency = cstr(currency).strip().upper()
+	return "{0} {1}".format(currency, value) if currency else value

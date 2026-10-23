@@ -17,9 +17,13 @@ rate, the company and the accounts. A form that let a buyer name the item would 
 them bill themselves for anything at any price.
 """
 
+from decimal import ROUND_HALF_UP
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
+
+from brchms.brchms_credits import terms
 
 
 class RestCreditPurchase(Document):
@@ -46,6 +50,32 @@ class RestCreditPurchase(Document):
 				_("Enter the amount you are paying — greater than zero."),
 				frappe.ValidationError,
 			)
+
+		# ── The site's minimum purchase ─────────────────────────────────────
+		#
+		# The form's JS carries the quote's `below_minimum`, but a crafted POST or
+		# a page left open while the minimum changed reaches this doctype without
+		# it. The intake row has no organization (the slug arrives at checkout),
+		# so only the SITE-WIDE floor can be enforced here; the organization's
+		# discount-aware floor is enforced by `quote` and by checkout, which do
+		# know the organization.
+		currency = (self.currency or "").strip().upper() or None
+		minimum_minor = terms.minimum_purchase_minor(currency)
+		if minimum_minor:
+			amount_minor = terms.major_to_minor(
+				self.amount, currency, rounding=ROUND_HALF_UP
+			)
+			if amount_minor < minimum_minor:
+				frappe.throw(
+					_(
+						"The minimum credit purchase is {0}. This order comes to {1}; increase the "
+						"number of credits."
+					).format(
+						terms.minimum_purchase_display(currency, minimum_minor),
+						terms.format_minor(amount_minor, currency),
+					),
+					frappe.ValidationError,
+				)
 
 		if not (self.buyer_name or "").strip():
 			frappe.throw(_("Enter your name."), frappe.ValidationError)

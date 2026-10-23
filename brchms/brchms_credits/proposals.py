@@ -52,7 +52,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, cint, cstr, now_datetime
 
-from brchms.brchms_credits import billing, invoicing, registry
+from brchms.brchms_credits import billing, invoicing, registry, terms
 
 PROPOSAL_DOCTYPE = "Rest Credit Proposal"
 INSTANCE_DOCTYPE = "Rest Instance"
@@ -96,6 +96,9 @@ def create_proposal(
 	buyer_email=None,
 	notes=None,
 	country_code=None,
+	list_unit_price_micros=None,
+	discount_basis_points=None,
+	rate_name=None,
 ):
 	"""
 	Raise a request to buy credits, or return the one already raised for this reference.
@@ -127,6 +130,14 @@ def create_proposal(
 		"amount_minor": amount_minor,
 		"currency": cstr(currency).strip().upper() or None,
 		"unit_price_micros": unit_price_micros,
+		# The price snapshot: what the rate card said, what the organization's
+		# discount was, and the effective price between them. Normalised below.
+		"list_unit_price_micros": list_unit_price_micros,
+		"discount_basis_points": discount_basis_points,
+		"discount_percent": None,
+		"list_amount_minor": None,
+		"discount_minor": None,
+		"rate_name": _cap(cstr(rate_name).strip(), 140) or None,
 		"buyer_email": _cap(cstr(buyer_email).strip(), 140) or None,
 		"notes": _cap(cstr(notes).strip(), 2000) or None,
 		# The deployment's own purchase id. Not a user-visible reference: it is the
@@ -148,16 +159,136 @@ def create_proposal(
 	for field in ("units", "amount_minor", "unit_price_micros"):
 		payload[field] = _as_integer(payload[field], field)
 
+	# The deployment must exist before anything is raised against it, and this is
+	# also where its display name and activity come from.
+	_touch_instance(payload["instance_id"], display_name=instance_name)
+
+	# ── The idempotent retry, BEFORE any re-pricing or limit ────────────────
+	#
+	# A retry after a lost response arrives with the same request key, possibly
+	# after an operator changed the rate, the organization's discount or the
+	# minimum. It must answer the proposal that already exists: refusing it
+	# because a term moved would turn a successful (but unacknowledged) request
+	# into a purchase nobody can pay. Only a genuinely NEW request is priced and
+	# checked against the terms in force now.
+	existing = _find_proposal(payload["instance_id"], request_key)
+	if existing:
+		doc = frappe.get_doc(PROPOSAL_DOCTYPE, existing)
+		# A proposal raised before its invoice could be built (or by an older
+		# version) is healed here rather than left permanently unpayable.
+		_ensure_page_quietly(doc)
+		return _proposal_response(doc, created=False)
+
+	# ── The price snapshot: list price, discount, effective price ───────────
+	#
+	# The app quotes from `get_credit_rate` and sends back the snapshot it showed
+	# the buyer. The discount is NOT accepted as a free-standing number: the
+	# registry is the authority, so a caller-supplied discount must name the same
+	# discount the organization actually has. That is what stops a tenant
+	# application -- or a crafted request -- from granting itself a cheaper
+	# price, while still letting the purchase prove it priced what the page
+	# displayed.
+	#
+	# A caller that sends no snapshot at all (an older app client, or a
+	# hand-raised proposal) gets the legacy behaviour: its own unit price is the
+	# list price and there is no discount. That can only ever charge the list
+	# price, never less, so the permissive path is the safe direction.
+	list_supplied = list_unit_price_micros not in (None, "")
+	discount_supplied = discount_basis_points not in (None, "")
+
+	if list_supplied:
+		payload["list_unit_price_micros"] = _as_integer(
+			list_unit_price_micros, "list_unit_price_micros"
+		)
+
+	if discount_supplied:
+		payload["discount_basis_points"] = _as_integer(
+			discount_basis_points, "discount_basis_points"
+		)
+	else:
+		payload["discount_basis_points"] = 0
+
+	if payload["discount_basis_points"] > terms.MAX_BASIS_POINTS:
+		frappe.throw(
+			_(
+				"Discount must be between 0% and 99.99%; {0} basis points is not a price that "
+				"can be charged."
+			).format(payload["discount_basis_points"]),
+			frappe.ValidationError,
+		)
+
+	if not list_supplied:
+		if payload["discount_basis_points"]:
+			frappe.throw(
+				_(
+					"This request claims a {0}% discount but names no list price to discount "
+					"from."
+				).format(payload["discount_basis_points"] / 100),
+				frappe.ValidationError,
+			)
+		payload["list_unit_price_micros"] = payload["unit_price_micros"]
+
+	list_micros = payload["list_unit_price_micros"]
+	basis_points = payload["discount_basis_points"]
+	effective_micros = terms.effective_unit_price_micros(list_micros, basis_points)
+
+	if effective_micros != payload["unit_price_micros"]:
+		frappe.throw(
+			_(
+				"The price on this request disagrees with its own discount: {0} micros with a "
+				"{1}% discount comes to {2} micros, not {3}. Re-quote the purchase."
+			).format(
+				list_micros,
+				basis_points / 100,
+				effective_micros,
+				payload["unit_price_micros"],
+			),
+			frappe.ValidationError,
+		)
+
+	pricing_error = terms.pricing_error_for(list_micros, basis_points)
+	if pricing_error:
+		frappe.throw(pricing_error, frappe.ValidationError)
+
+	if list_supplied or discount_supplied:
+		configured_bp = terms.discount_basis_points(
+			payload["organization_id"], payload["instance_id"]
+		)
+		if basis_points != configured_bp:
+			# Refused rather than silently re-priced in either direction: the buyer
+			# was shown one price and the organization's term is another. A purchase
+			# that quietly charged the new discount could over-refund; one that
+			# quietly charged the old price would bill against a term that no longer
+			# exists.
+			frappe.throw(
+				_(
+					"The price of this purchase changed while it was being raised. Refresh the "
+					"quote and try again."
+				),
+				frappe.ValidationError,
+			)
+
+	payload["discount_percent"] = round(basis_points / 100, 2)
+	payload["list_amount_minor"] = invoicing.minor_amount_for(
+		payload["units"], list_micros, payload["currency"]
+	)
+	discount_minor = payload["list_amount_minor"] - payload["amount_minor"]
+	if discount_minor < 0:
+		frappe.throw(
+			_(
+				"The amount on this request ({0}) is greater than its own list amount ({1}); a "
+				"discount cannot increase what the buyer pays."
+			).format(payload["amount_minor"], payload["list_amount_minor"]),
+			frappe.ValidationError,
+		)
+	payload["discount_minor"] = discount_minor
+
 	if payload["channel"] not in ("sms", "email"):
 		frappe.throw(
 			_("Channel must be 'sms' or 'email', not '{0}'.").format(
 				frappe.utils.escape_html(cstr(payload["channel"]))
 			)
 		)
-
-	# The deployment must exist before anything is raised against it, and this is
-	# also where its display name and activity come from.
-	_touch_instance(payload["instance_id"], display_name=instance_name)
 
 	# ── The two data refusals, before anything exists to reconcile ──────────
 	#
@@ -210,13 +341,25 @@ def create_proposal(
 			frappe.ValidationError,
 		)
 
-	existing = _find_proposal(payload["instance_id"], request_key)
-	if existing:
-		doc = frappe.get_doc(PROPOSAL_DOCTYPE, existing)
-		# A proposal raised before its invoice could be built (or by an older
-		# version) is healed here rather than left permanently unpayable.
-		_ensure_page_quietly(doc)
-		return _proposal_response(doc, created=False)
+	# ── The site's minimum purchase ─────────────────────────────────────────
+	#
+	# Authoritative here, at the API that raises the request: the quote and the
+	# public form show the floor, the checkout refuses below it, and this is the
+	# gate a crafted or app-driven request cannot step around. It compares the
+	# NET amount (what the buyer pays after any discount), because that is what
+	# the payment floor is about. Refused before any proposal/invoice exists.
+	minimum_minor = terms.minimum_purchase_minor(payload["currency"])
+	if minimum_minor and payload["amount_minor"] < minimum_minor:
+		frappe.throw(
+			_(
+				"The minimum credit purchase is {0}. This purchase comes to {1}; add more credits "
+				"and try again."
+			).format(
+				terms.minimum_purchase_display(payload["currency"], minimum_minor),
+				invoicing.format_minor(payload["amount_minor"], payload["currency"]),
+			),
+			frappe.ValidationError,
+		)
 
 	# The reference is always present, and never invented by the payer.
 	#
@@ -300,6 +443,8 @@ def ensure_page(doc):
 			amount_minor=doc.amount_minor,
 			currency=doc.currency,
 			unit_price_micros=doc.unit_price_micros,
+			list_unit_price_micros=doc.list_unit_price_micros or doc.unit_price_micros,
+			discount_basis_points=doc.discount_basis_points or 0,
 			instance_id=doc.instance_id,
 			company=doc.company or _company_for_doc(doc),
 		)
@@ -390,7 +535,20 @@ def quote(channel=None, units=None, currency=None, org=None, country_code=None):
 	elif cstr(country_code).strip():
 		company = billing.resolve_billing_context(country_code, currency=currency)["company"]
 
-	return invoicing.quote(channel=channel, units=units, currency=currency, company=company)
+	# The organization is the authority for its own discount. It is resolved from
+	# the registry row the link names -- never taken from the page -- so a public
+	# quote cannot ask for a cheaper price than the church's term.
+	discount_basis_points = (
+		terms.discount_basis_points(row.organization_id, row.instance_id) if row else 0
+	)
+
+	return invoicing.quote(
+		channel=channel,
+		units=units,
+		currency=currency,
+		company=company,
+		discount_basis_points=discount_basis_points,
+	)
 
 
 @frappe.whitelist()
@@ -417,6 +575,22 @@ def get_billing_context(
 		require_billing=False,
 	)
 
+	def _term_fields(effective_currency):
+		"""
+		The organization's commercial terms, for whichever answer this call gives.
+
+		Included even when billing is not ready: a church with an unmapped country
+		still has a discount and a monthly allowance, and hiding them behind the
+		billing blocker would tell the operator the wrong thing about what is
+		missing.
+		"""
+		return terms.context_fields(
+			instance_id=cstr(registration.instance_id).strip(),
+			organization_id=cstr(registration.organization_id).strip(),
+			currency=effective_currency,
+			display_currency=cstr(registration.billing_currency).strip() or effective_currency,
+		)
+
 	effective_country = cstr(registration.billing_country).strip() or cstr(country_code).strip()
 	if effective_country:
 		ready, context, reason = billing.billing_is_ready(effective_country, currency=currency)
@@ -430,6 +604,7 @@ def get_billing_context(
 				"region": context["region"],
 				"region_name": context["region_name"],
 				"reason": None,
+				**_term_fields(context["currency"]),
 			}
 		return {
 			"ready": False,
@@ -440,6 +615,7 @@ def get_billing_context(
 			"region": None,
 			"region_name": None,
 			"reason": reason,
+			**_term_fields(cstr(currency).strip().upper() or None),
 		}
 
 	# Legacy single-company sites may not have a billing country yet. Keep them
@@ -456,6 +632,7 @@ def get_billing_context(
 			"region": None,
 			"region_name": None,
 			"reason": cstr(getattr(error, "message", None) or str(error)),
+			**_term_fields(cstr(currency).strip().upper() or None),
 		}
 
 	return {
@@ -467,6 +644,9 @@ def get_billing_context(
 		"region": None,
 		"region_name": None,
 		"reason": None,
+		**_term_fields(
+			cstr(frappe.db.get_value("Company", company, "default_currency")).upper() or currency
+		),
 	}
 
 
@@ -508,6 +688,17 @@ def list_settled_proposals(instance_id=None, since=None, limit=200):
 			"company",
 			"billing_country",
 			"unit_price_micros",
+			# The price snapshot travels with the settlement: a purchase BORN ON
+			# THE PUBLIC FORM has no app-side record to read the list price, the
+			# organization's discount or the rate row from, so the poller that
+			# creates that record learns them here. Without them the app would
+			# record the net amount with no attributable gross or term.
+			"list_unit_price_micros",
+			"list_amount_minor",
+			"discount_basis_points",
+			"discount_percent",
+			"discount_minor",
+			"rate_name",
 			"buyer_email",
 			"invoice",
 			"payment_url",
@@ -786,7 +977,26 @@ def settle_proposal(proposal=None, purchase_reference=None, payment_doctype=None
 	`brchms_credits.settlement`. This is for a payment whose document exists but
 	whose invoice did not carry a `purchase_reference` — or a settlement the hook
 	logged and deliberately did not complete.
+
+	## Who may call it
+
+	Only a user who holds the `submit` permission on the proposal. That check is
+	the FIRST thing this method does, before it reads a proposal or a payment
+	document: the method submits with `ignore_permissions`, so without this gate
+	the whitelisted endpoint would be a way around the permission wall that is
+	the entire settlement boundary. The app's `Rest Integration` role does not
+	hold `submit`, so a leaked integration token cannot use this escape hatch.
 	"""
+	if not frappe.has_permission(PROPOSAL_DOCTYPE, "submit"):
+		frappe.throw(
+			_(
+				"Settling a credit proposal needs the submit permission on Rest Credit Proposal. "
+				"The settlement boundary exists so a request cannot become claimable without a "
+				"person (or a gateway's own handler) filing the payment."
+			),
+			frappe.PermissionError,
+		)
+
 	from brchms.brchms_credits import settlement as settlement_module
 
 	name = cstr(proposal).strip()
@@ -898,6 +1108,15 @@ def _proposal_response(doc, created=None):
 		"company": cstr(doc.company) if doc.company else None,
 		"billing_country": cstr(doc.billing_country) if doc.billing_country else None,
 		"unit_price_micros": int(doc.unit_price_micros or 0),
+		# The price snapshot: the rate card's list price, the organization's
+		# discount, and the money it took off. The app records the purchase
+		# against these, so a later term change cannot rewrite what was charged.
+		"list_unit_price_micros": int(doc.list_unit_price_micros or 0),
+		"list_amount_minor": int(doc.list_amount_minor or 0),
+		"discount_minor": int(doc.discount_minor or 0),
+		"discount_basis_points": int(doc.discount_basis_points or 0),
+		"discount_percent": float(doc.discount_percent or 0),
+		"rate_name": cstr(doc.rate_name) if doc.rate_name else None,
 		"state": state,
 		# The one fact the app acts on. Submitted, and not past its deadline.
 		"claimable": state == "settled",

@@ -1,0 +1,272 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-10-23 00:00:00.000000",
+ "description": "One malfunction report filed from the Rest app. The support team triages it here: status, priority, admin notes and the resolution date are the Desk's fields; the reporter, the page they were on and the optional private screenshot are what the app sent.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_break_report",
+  "client_request_id",
+  "instance_id",
+  "column_break_report",
+  "reported_at",
+  "source",
+  "section_break_reporter",
+  "reporter_user_id",
+  "reporter_name",
+  "reporter_email",
+  "column_break_reporter",
+  "organization_id",
+  "organization_name",
+  "category",
+  "section_break_context",
+  "description",
+  "screenshot",
+  "column_break_context",
+  "page_url",
+  "app_version",
+  "user_agent",
+  "section_break_triage",
+  "status",
+  "priority",
+  "admin_notes",
+  "column_break_triage",
+  "resolution_date"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_break_report",
+   "fieldtype": "Section Break",
+   "label": "Report"
+  },
+  {
+   "description": "The app's idempotency key for this submission. A replay with the same deployment and key returns this row instead of creating a second one.",
+   "fieldname": "client_request_id",
+   "fieldtype": "Data",
+   "label": "Client Request ID",
+   "length": 100,
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "description": "The Rest deployment that filed the report (its site name).",
+   "fieldname": "instance_id",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "Instance ID",
+   "length": 60,
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_report",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "now",
+   "description": "When the app recorded the report (the reporter's clock is not trusted; this is the instance's).",
+   "fieldname": "reported_at",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Reported At",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "Rest app",
+   "description": "Where the report came from. A future channel can record its own name without changing the doctype.",
+   "fieldname": "source",
+   "fieldtype": "Data",
+   "label": "Source",
+   "length": 60,
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_reporter",
+   "fieldtype": "Section Break",
+   "label": "Reporter"
+  },
+  {
+   "description": "The signed-in user's Strapi document id. Stable across a rename, unlike the name or email.",
+   "fieldname": "reporter_user_id",
+   "fieldtype": "Data",
+   "label": "Reporter User ID",
+   "length": 100,
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "reporter_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Reporter Name",
+   "length": 200,
+   "read_only": 1
+  },
+  {
+   "fieldname": "reporter_email",
+   "fieldtype": "Data",
+   "label": "Reporter Email",
+   "length": 200,
+   "options": "Email",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_reporter",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The organization the reporter was working in, when their session named one.",
+   "fieldname": "organization_id",
+   "fieldtype": "Data",
+   "label": "Organization ID",
+   "length": 100,
+   "read_only": 1
+  },
+  {
+   "fieldname": "organization_name",
+   "fieldtype": "Data",
+   "label": "Organization Name",
+   "length": 200,
+   "read_only": 1
+  },
+  {
+   "description": "What kind of problem the reporter chose. Set by the app and never edited here.",
+   "fieldname": "category",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Category",
+   "options": "app_error\ndata_error\naccess_login\nperformance\nother",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_context",
+   "fieldtype": "Section Break",
+   "label": "What happened"
+  },
+  {
+   "description": "The reporter's own words. Plain text, never rendered as HTML.",
+   "fieldname": "description",
+   "fieldtype": "Long Text",
+   "label": "Description",
+   "reqd": 1
+  },
+  {
+   "description": "Optional screenshot from the app. Saved as a private file attached to this report.",
+   "fieldname": "screenshot",
+   "fieldtype": "Attach Image",
+   "label": "Screenshot"
+  },
+  {
+   "fieldname": "column_break_context",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The app route the reporter was on, path and query only — never a full URL with a session token.",
+   "fieldname": "page_url",
+   "fieldtype": "Data",
+   "label": "Page",
+   "length": 600,
+   "read_only": 1
+  },
+  {
+   "fieldname": "app_version",
+   "fieldtype": "Data",
+   "label": "App Version",
+   "length": 50,
+   "read_only": 1
+  },
+  {
+   "description": "The browser's user-agent string. Diagnostic only; the support team reads it for a browser-specific fault.",
+   "fieldname": "user_agent",
+   "fieldtype": "Small Text",
+   "label": "User Agent",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_triage",
+   "fieldtype": "Section Break",
+   "label": "Triage"
+  },
+  {
+   "default": "new",
+   "description": "new: not looked at yet. in-review: being investigated. resolved: fixed. rejected: not a defect.",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "new\nin-review\nresolved\nrejected",
+   "reqd": 1
+  },
+  {
+   "default": "medium",
+   "fieldname": "priority",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Priority",
+   "options": "low\nmedium\nhigh\nurgent",
+   "reqd": 1
+  },
+  {
+   "description": "What the support team found, and what the reporter was told.",
+   "fieldname": "admin_notes",
+   "fieldtype": "Text",
+   "label": "Admin Notes"
+  },
+  {
+   "fieldname": "column_break_triage",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "When the report was resolved or rejected.",
+   "fieldname": "resolution_date",
+   "fieldtype": "Datetime",
+   "label": "Resolution Date"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-23 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Support",
+ "name": "Rest Malfunction Report",
+ "naming_rule": "Expression (old style)",
+ "autoname": "format:REST-MFR-{#####}",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Rest Support Agent",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "reported_at",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

@@ -472,8 +472,9 @@ WEB_FORM_FIELDS = (
 		"read_only": 1,
 		"description": (
 			"The exact price for the credits entered, computed from your church's billing "
-			"region as you type. It cannot be typed over, so what you see is what you are "
-			"billed."
+			"region as you type. Any negotiated discount is already applied, and the "
+			"minimum purchase is shown beside it. It cannot be typed over, so what you "
+			"see is what you are billed."
 		),
 	},
 	{
@@ -496,7 +497,10 @@ WEB_FORM_FIELDS = (
 #     public, so this is the only way a submission says whose credits it is
 #     buying — and `checkout` refuses any submission that arrives without one.
 #   * the COMPUTED AMOUNT, refreshed from `quote` as the buyer types (and once on
-#     load, which also wipes any amount a crafted URL tried to pre-fill).
+#     load, which also wipes any amount a crafted URL tried to pre-fill);
+#   * the TERMS that decide whether the purchase may happen — a discount, the
+#     minimum purchase, or a pricing error — shown beneath the amount exactly as
+#     `quote` derived them (the browser never does its own pricing arithmetic).
 #
 # ## Why there is NO `frappe.ready(...)` wrapper
 #
@@ -618,9 +622,81 @@ function requote() {
 					amount_field.refresh();
 				}
 				show_billing(r.message.company, r.message.currency);
+				show_pricing(r.message);
 			}
 		}
 	});
+}
+
+/*
+ * The buyer's commercial terms, as the SERVER derived them.
+ *
+ * The amount stays server-derived (`requote` writes what `quote` answered); this
+ * block only explains that amount: a discount is applied, the order is below the
+ * minimum, or the terms cannot price it at all. No arithmetic happens here -- a
+ * second pricing implementation in the browser is how the page and the invoice
+ * start to disagree.
+ */
+var current_quote = null;
+
+function format_amount(value, currency) {
+	if (value === null || value === undefined) {
+		return "";
+	}
+	var text = String(value);
+	if (currency) {
+		return currency + " " + text;
+	}
+	return text;
+}
+
+function show_pricing(quote) {
+	current_quote = quote || null;
+
+	var target = $(".rest-credit-pricing-note");
+	if (!target.length) {
+		target = $("<div class='rest-credit-pricing-note small mt-2'></div>");
+		var billing_note = $(".rest-credit-billing-note");
+		if (billing_note.length) {
+			billing_note.after(target);
+		} else {
+			var amount = frappe.web_form.fields_dict.amount;
+			if (amount && amount.$wrapper) {
+				amount.$wrapper.after(target);
+			} else {
+				return;
+			}
+		}
+	}
+
+	var message = "";
+	var is_error = false;
+
+	if (!quote) {
+		target.hide();
+		return;
+	}
+
+	if (quote.pricing_error) {
+		message = __("This purchase cannot be priced: {0}", [quote.pricing_error]);
+		is_error = true;
+	} else if (quote.below_minimum) {
+		message = __(
+			"The minimum credit purchase is {0}. This order comes to {1}.",
+			[
+				quote.minimum_purchase_amount || "",
+				format_amount(quote.amount_major, quote.currency)
+			]
+		);
+		is_error = true;
+	} else if (quote.discount_percent) {
+		message = __("A {0}% discount is applied to the list price.", [quote.discount_percent]);
+	}
+
+	target.text(message);
+	target.toggleClass("text-danger", is_error);
+	target.toggleClass("text-muted", !is_error);
+	target.toggle(!!message);
 }
 
 function show_billing(company, currency) {
@@ -729,6 +805,18 @@ frappe.web_form.after_save = function () {
 					   "Please contact us and quote " + frappe.web_form.doc.name + ".")
 				);
 			}
+		},
+		error: function () {
+			/*
+			 * `checkout` refuses a price that changed, terms that left no price, or
+			 * an order below the minimum -- and the intake row exists by then. Say
+			 * so; the buyer must not be left on a page that silently did nothing.
+			 */
+			frappe.msgprint(
+				__("Your purchase was saved, but it could not be completed. " +
+				   "Please contact us and quote " +
+				   (frappe.web_form.doc && frappe.web_form.doc.name ? frappe.web_form.doc.name : "") + ".")
+			);
 		}
 	});
 };

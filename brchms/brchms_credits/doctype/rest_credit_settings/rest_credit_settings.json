@@ -1,0 +1,62 @@
+{
+ "actions": [],
+ "creation": "2026-10-23 00:00:00.000000",
+ "description": "The commercial terms that apply to every credit purchase on this site. A Single because there is one answer: a floor below which taking a payment costs more than the sale. The organization's own negotiated terms (a discount, a monthly free-credit allowance) live on Rest Credit Organization, because those are per church.",
+ "doctype": "DocType",
+ "document_type": "Document",
+ "engine": "InnoDB",
+ "field_order": [
+  "minimum_purchase_amount",
+  "section_break_help",
+  "help_text"
+ ],
+ "fields": [
+  {
+   "default": "0",
+   "description": "The smallest credit purchase this site will sell, in major units (for example 5 means GHS 5.00 on a Ghana purchase and CAD 5.00 on a Canadian one \u2014 the figure is applied nominally in each currency, because this app has no exchange rate). Zero switches the floor off. A purchase whose amount comes to less than this is refused before a proposal or an invoice exists.",
+   "fieldname": "minimum_purchase_amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Minimum Purchase Amount"
+  },
+  {
+   "fieldname": "section_break_help",
+   "fieldtype": "Section Break",
+   "label": "How The Minimum Applies"
+  },
+  {
+   "description": "The floor applies to the AMOUNT the buyer pays (after any organization discount), not to the list price and not to the number of units. It is enforced by quote, by create_proposal, by the public checkout and by the purchase intake, so a hand-edited or crafted request cannot get under it. A minimum here never blocks a settled payment: an existing payment is a fact and is recorded whatever it came to.",
+   "fieldname": "help_text",
+   "fieldtype": "Small Text",
+   "label": "Notes",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-23 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Brchms Credits",
+ "name": "Rest Credit Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 0,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 0,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1,
+ "issingle": 1,
+ "is_single": 1
+}

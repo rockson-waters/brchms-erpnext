@@ -173,6 +173,35 @@ def checkout(purchase=None, org=None):
 					frappe.ValidationError,
 				)
 
+		# ── The terms that decide whether this purchase may happen ─────────────
+		#
+		# A discount that leaves no price, or a floor the order does not reach, is
+		# refused with the buyer's sentence -- after the amount check, because "the
+		# amount on the page is stale" is the real problem when it applies, and
+		# telling the buyer "below the minimum" would send them to buy more credits
+		# for a price that does not exist.
+		pricing_error = cstr(quoted.get("pricing_error") or "").strip()
+		if pricing_error:
+			frappe.throw(
+				_("This purchase cannot be priced: {0}").format(pricing_error),
+				frappe.ValidationError,
+			)
+
+		if quoted.get("below_minimum"):
+			minimum_display = quoted.get("minimum_purchase_amount") or invoicing.format_minor(
+				quoted.get("minimum_purchase_minor") or 0, quoted["currency"]
+			)
+			frappe.throw(
+				_(
+					"The minimum credit purchase is {0}. This purchase comes to {1}; go back and "
+					"buy more credits."
+				).format(
+					minimum_display,
+					invoicing.format_minor(amount_minor, quoted["currency"]),
+				),
+				frappe.ValidationError,
+			)
+
 		# ── The proposal, carrying the identity the settlement needs ─────────
 		result = proposals.create_proposal(
 			instance_id=registry_row.instance_id,
@@ -190,6 +219,11 @@ def checkout(purchase=None, org=None):
 			amount_minor=amount_minor,
 			currency=quoted["currency"],
 			unit_price_micros=quoted["unit_price_micros"],
+			# The price snapshot the buyer was shown: the list price and the
+			# organization's discount, from `quote` -- never from the page.
+			list_unit_price_micros=quoted["list_price_per_unit_micros"],
+			discount_basis_points=quoted["discount_basis_points"],
+			rate_name=quoted.get("rate_name"),
 			instance_name=registry_row.organization_name,
 			buyer_email=doc.buyer_email,
 			country_code=registry_row.billing_country,

@@ -16,12 +16,14 @@ tenant application deliberately does not hold it. That is the boundary: nothing 
 app says, on its own, can turn a request into credits.
 """
 
+from decimal import Decimal
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint, cstr, now_datetime
 
-from brchms.brchms_credits import invoicing
+from brchms.brchms_credits import invoicing, terms
 
 # Doctypes whose records already carry a gateway's own transaction identifier, so the
 # proposal does not need a hand-entered reference on top of them.
@@ -31,6 +33,7 @@ GATEWAY_MANAGED_DOCTYPES = {"Payment Request", "Integration Request"}
 class RestCreditProposal(Document):
 	def validate(self):
 		self._require_the_essentials()
+		self._validate_discount_snapshot()
 		self._refuse_edits_after_submission()
 		self._stamp_the_settler()
 		self._record_any_variance()
@@ -115,6 +118,10 @@ class RestCreditProposal(Document):
 			("units", "Units"),
 			("amount_minor", "Amount"),
 			("unit_price_micros", "Unit Price"),
+			("list_unit_price_micros", "List Unit Price"),
+			("discount_basis_points", "Discount (basis points)"),
+			("list_amount_minor", "List Amount"),
+			("discount_minor", "Discount"),
 		):
 			raw = self.get(fieldname)
 			if raw in (None, ""):
@@ -126,6 +133,92 @@ class RestCreditProposal(Document):
 			if value < 0:
 				frappe.throw(_("{0} cannot be negative.").format(label))
 			self.set(fieldname, value)
+
+	def _validate_discount_snapshot(self):
+		"""
+		The discount snapshot must agree with its own price.
+
+		The effective price is RE-DERIVED from `(list_unit_price_micros,
+		discount_basis_points)` with the same integer half-up rule the quote, the
+		invoice and the platform application use. A hand-edited row -- or an
+		older client trying to name its own price -- therefore cannot produce a
+		proposal whose effective price nobody can derive.
+
+		This deliberately does NOT re-check the SITE MINIMUM against the current
+		settings: a minimum may be raised after a purchase was quoted, and
+		refusing an already-quoted purchase retroactively would strand money
+		that genuinely moved. The minimum is enforced at raise time (quote,
+		checkout, create_proposal) and the settled amount is a fact.
+
+		Legacy rows raised before terms existed have no list price: their own
+		`unit_price_micros` IS the list price, and they are normalised here so
+		every later read sees the same shape.
+		"""
+		list_micros = cint(self.list_unit_price_micros or 0)
+		basis_points = cint(self.discount_basis_points or 0)
+		effective = cint(self.unit_price_micros or 0)
+		units = cint(self.units or 0)
+
+		if not list_micros:
+			if basis_points:
+				frappe.throw(
+					_(
+						"A proposal claiming a {0}% discount must also record the list price it was "
+						"discounted from."
+					).format(basis_points / 100),
+					frappe.ValidationError,
+				)
+			self.list_unit_price_micros = effective
+			self.discount_basis_points = 0
+			self.discount_percent = 0.0
+			self.list_amount_minor = cint(self.amount_minor or 0)
+			self.discount_minor = 0
+			return
+
+		if basis_points < 0 or basis_points > terms.MAX_BASIS_POINTS:
+			frappe.throw(
+				_(
+					"Discount must be between 0% and 99.99%; {0} basis points is not a price that "
+					"can be charged."
+				).format(basis_points),
+				frappe.ValidationError,
+			)
+
+		expected = terms.effective_unit_price_micros(list_micros, basis_points)
+		if effective != expected:
+			frappe.throw(
+				_(
+					"The discount snapshot on this proposal disagrees with its own price: {0} micros "
+					"with a {1}% discount comes to {2} micros, not {3}. Re-quote the purchase."
+				).format(
+					list_micros,
+					Decimal(basis_points) / 100,
+					expected,
+					effective,
+				),
+				frappe.ValidationError,
+			)
+
+		self.discount_percent = round(basis_points / 100, 2)
+
+		if not units or not cstr(self.currency).strip():
+			# Raised before the essentials are complete; the derived amounts are
+			# filled once the purchase has a quantity and a currency.
+			return
+
+		list_amount = invoicing.minor_amount_for(units, list_micros, self.currency)
+		amount = cint(self.amount_minor or 0)
+		if amount > list_amount:
+			frappe.throw(
+				_(
+					"The discounted amount on this proposal ({0}) is greater than its list amount "
+					"({1}). A discount cannot increase what the buyer pays."
+				).format(amount, list_amount),
+				frappe.ValidationError,
+			)
+
+		self.list_amount_minor = list_amount
+		self.discount_minor = list_amount - amount
 
 	def _refuse_edits_after_submission(self):
 		"""
@@ -149,6 +242,10 @@ class RestCreditProposal(Document):
 			("currency", "Currency"),
 			("channel", "Channel"),
 			("unit_price_micros", "Unit Price"),
+			("list_unit_price_micros", "List Unit Price"),
+			("discount_basis_points", "Discount (basis points)"),
+			("list_amount_minor", "List Amount"),
+			("discount_minor", "Discount"),
 			("instance_id", "Rest Instance"),
 		):
 			if self.get(fieldname) != before.get(fieldname):

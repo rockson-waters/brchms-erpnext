@@ -1,0 +1,11 @@
+{
+ "doctype": "Role",
+ "name": "Rest Support Agent",
+ "role_name": "Rest Support Agent",
+ "desk_access": 1,
+ "is_custom": 1,
+ "disabled": 0,
+ "two_factor_auth": 0,
+ "restrict_to_domain": "",
+ "description": "Triages the malfunction reports the Rest app files. Reads, re-statuses, annotates and resolves them in the Desk. Deliberately not the role the app's credential holds: the integration user files reports through a whitelisted method, and giving that long-lived token write access to the report record would let it rewrite one."
+}

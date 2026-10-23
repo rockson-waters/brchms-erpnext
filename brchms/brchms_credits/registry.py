@@ -132,6 +132,11 @@ def ensure_registration(
 		doc.insert()
 		frappe.db.commit()
 
+	# Only the fields named in `updates` are changed. In particular the COMMERCIAL
+	# TERMS (`discount_percent`, `discount_note`, the monthly allowance units and
+	# `free_credits_rollover`) are NEVER written here: they are an operator's
+	# negotiated terms, and a registration refresh (which may be triggered by a
+	# purchase-link read) must not reset a discount or an allowance to a default.
 	updates = {}
 	if organization_name and cstr(doc.organization_name).strip() != cstr(organization_name).strip():
 		updates["organization_name"] = cstr(organization_name).strip()

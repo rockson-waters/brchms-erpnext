@@ -31,7 +31,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, cstr, now_datetime, nowdate
 
-from brchms.brchms_credits import billing
+from brchms.brchms_credits import billing, terms
 
 INSTANCE_DOCTYPE = "Rest Instance"
 
@@ -337,7 +337,14 @@ def billing_preflight():
 
 @frappe.whitelist()
 def get_credit_rate(
-	channel=None, currency=None, destination=None, at=None, company=None, organization_id=None, country_code=None
+	channel=None,
+	currency=None,
+	destination=None,
+	at=None,
+	company=None,
+	organization_id=None,
+	country_code=None,
+	instance_id=None,
 ):
 	"""
 	The price of one service unit, in millionths of a major unit.
@@ -377,6 +384,24 @@ def get_credit_rate(
 	credits for nothing, and throwing would put the sentence in the wrong layer. So
 	the absence is reported as data and the app refuses.
 
+	## The organization's terms
+
+	`organization_id` (and its deployment's `instance_id`) asks this method to apply
+	the organization's negotiated discount, and to report the site-wide minimum
+	purchase. The DISCOUNT IS RESOLVED HERE from the registry, never accepted as a
+	number from the caller: a tenant application that could name its own discount
+	could buy credits at any price. The answer carries:
+
+	  * `list_price_per_unit_micros` -- the rate card's price,
+	  * `price_per_unit_micros` -- the EFFECTIVE price after the discount,
+	  * `discount_basis_points` / `discount_percent`,
+	  * `minimum_purchase_minor` / `minimum_purchase_amount`,
+	  * `pricing_error` -- a term that cannot be priced (e.g. a discount leaving
+	    zero), reported as data for the same reason `unconfigured` is.
+
+	Without an organization the answer is the plain list price with no discount,
+	but still carries the site minimum: every buyer faces the same floor.
+
 	`rate_name` is returned so a purchase can record WHICH row it was quoted from.
 	Without it a later rate change leaves a quoted purchase unattributable, and
 	"priced once, never re-priced" stops being checkable.
@@ -408,6 +433,12 @@ def get_credit_rate(
 		"channel": channel,
 		"unit": CHANNEL_UNITS[channel],
 		"price_per_unit_micros": 0,
+		"list_price_per_unit_micros": 0,
+		"discount_basis_points": 0,
+		"discount_percent": 0.0,
+		"minimum_purchase_minor": 0,
+		"minimum_purchase_amount": None,
+		"pricing_error": None,
 		"currency": currency,
 		"company": company,
 		"country_code": country,
@@ -418,16 +449,27 @@ def get_credit_rate(
 		"source": "unconfigured",
 	}
 
+	rate = base
 	if country:
 		for row in _active_rates(channel, moment, company):
 			if cstr(row.country_code) == country:
-				return _as_rate(row, base, "exact_country")
+				rate = _as_rate(row, base, "exact_country")
+				break
 
-	for row in _active_rates(channel, moment, company):
-		if not row.country_code:
-			return _as_rate(row, base, "channel_default")
+	if rate is base:
+		for row in _active_rates(channel, moment, company):
+			if not row.country_code:
+				rate = _as_rate(row, base, "channel_default")
+				break
 
-	return base
+	return terms.apply_to_rate(
+		rate,
+		terms.terms_for(
+			instance_id=instance_id,
+			organization_id=organization_id,
+			currency=currency,
+		),
+	)
 
 
 def _active_rates(channel, moment, company):
@@ -526,3 +568,90 @@ def _require_rate_keys(channel, currency):
 		frappe.throw(_("A rate is quoted in a currency, and none was named."), frappe.ValidationError)
 
 	return channel, currency
+
+
+# ── monthly free-credit entitlements ───────────────────────────────────────
+
+
+@frappe.whitelist()
+def list_credit_allowances(instance_id=None, period=None):
+	"""
+	The monthly free-credit entitlements for one deployment.
+
+	The app's allowance poller reads this, then grants the units into its own
+	ledger. **ERPNext owns the entitlement; the app owns the balance.** One
+	direction only: the app never writes an allowance here, and this method
+	writes nothing at all -- a late or repeated read returns the same answer for
+	the same period, so the poller's idempotency key (`period`) is what makes a
+	monthly grant single, not a stored claim on this side.
+
+	## What a grant is, and what it is not
+
+	A grant is `units` of one channel for one organization's DEFAULT funding
+	group: the group a public-form purchase would credit, so an allowance adds
+	up on the same balance a purchase does. Units are not money and are not
+	priced; `currency` travels only for the app ledger's provenance.
+
+	## Positive only, and no silent loss
+
+	An organization with no allowance on a channel contributes no grant. An
+	organization that HAS an allowance but no `default_group_id` cannot be
+	granted anywhere -- that is reported in `skipped` with a reason, so the
+	entitlement is visible instead of silently dropped. `period` is UTC
+	(`YYYY-MM`) because both ends must name the same month.
+
+	Returns `{"period", "grants": [...], "skipped": [...]}` wherever the
+	deployment has no organizations: an empty entitlement list is a successful
+	answer, not an error.
+	"""
+	instance_id = cstr(instance_id).strip()
+	if not instance_id:
+		frappe.throw(_("instance_id is required."), frappe.MandatoryError)
+
+	period = terms.normalize_period(period)
+	grants = []
+	skipped = []
+
+	for row in terms.allowance_rows(instance_id):
+		entitlements = terms.channel_allowances(row)
+		if not entitlements:
+			continue
+
+		organization_id = cstr(row.get("organization_id")).strip()
+		organization_name = cstr(row.get("organization_name")).strip() or None
+		funding_group_id = cstr(row.get("default_group_id")).strip()
+		funding_group_name = cstr(row.get("default_group_name")).strip() or None
+		currency = terms.allowance_currency(row) or terms.default_currency()
+		rollover = bool(cint(row.get("free_credits_rollover")))
+
+		for channel, units in entitlements:
+			if not funding_group_id:
+				skipped.append(
+					{
+						"organization_id": organization_id,
+						"organization_name": organization_name,
+						"channel": channel,
+						"units": units,
+						"reason": _(
+							"No default funding group is registered, so the allowance has nowhere "
+							"to be granted. Open the credits page in the app once to complete "
+							"registration."
+						),
+					}
+				)
+				continue
+
+			grants.append(
+				{
+					"organization_id": organization_id,
+					"organization_name": organization_name,
+					"funding_group_id": funding_group_id,
+					"funding_group_name": funding_group_name,
+					"channel": channel,
+					"units": units,
+					"currency": currency,
+					"rollover": rollover,
+				}
+			)
+
+	return {"period": period, "grants": grants, "skipped": skipped}

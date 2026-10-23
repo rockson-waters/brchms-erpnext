@@ -24,11 +24,17 @@
   "channel",
   "units",
   "column_break_money",
+  "list_amount_minor",
+  "discount_minor",
   "amount_minor",
   "currency",
   "company",
   "billing_country",
   "unit_price_micros",
+  "list_unit_price_micros",
+  "discount_basis_points",
+  "discount_percent",
+  "rate_name",
   "section_break_settlement",
   "payment_doctype",
   "payment_document",
@@ -160,13 +166,29 @@
    "fieldtype": "Column Break"
   },
   {
+   "fieldname": "list_amount_minor",
+   "fieldtype": "Long Int",
+   "label": "List Amount (minor units)",
+   "non_negative": 1,
+   "read_only": 1,
+   "description": "What the purchase would have cost at the rate card's LIST price, in the currency's minor units. Snapshotted when the proposal is raised so the discount stays checkable after the organization's terms or the rate card change. amount_minor is what the buyer actually pays."
+  },
+  {
+   "fieldname": "discount_minor",
+   "fieldtype": "Long Int",
+   "label": "Discount (minor units)",
+   "non_negative": 1,
+   "read_only": 1,
+   "description": "list_amount_minor minus amount_minor: the money the organization's discount took off this purchase. Recorded rather than recomputed later, because a term change must not rewrite what was charged."
+  },
+  {
    "fieldname": "amount_minor",
    "fieldtype": "Long Int",
    "label": "Amount (minor units)",
    "reqd": 1,
    "in_list_view": 1,
    "non_negative": 1,
-   "description": "What the deployment quoted, in the currency's MINOR units. A settler may correct it: a payment that arrives for a different amount is a fact about money that moved, and refusing it would strand a real payment. The settled amount wins and the difference is recorded."
+   "description": "What the buyer pays, in the currency's MINOR units: the quoted list amount less the organization's discount. A settler may correct it: a payment that arrives for a different amount is a fact about money that moved, and refusing it would strand a real payment. The settled amount wins and the difference is recorded."
   },
   {
    "fieldname": "currency",
@@ -197,7 +219,39 @@
    "fieldtype": "Long Int",
    "label": "Unit Price (micros)",
    "non_negative": 1,
-   "description": "The price this purchase was quoted at, in millionths of a major unit. Pricing is pinned when the app raises the request and never re-priced."
+   "description": "The EFFECTIVE price this purchase was quoted at, in millionths of a major unit: the list price with the organization's discount applied. Pricing is pinned when the app raises the request and never re-priced."
+  },
+  {
+   "fieldname": "list_unit_price_micros",
+   "fieldtype": "Long Int",
+   "label": "List Unit Price (micros)",
+   "non_negative": 1,
+   "read_only": 1,
+   "description": "The rate card's list price for one unit when the purchase was quoted. unit_price_micros is this figure with the organization's discount applied; keeping both makes the discount auditable even after the rate card or the organization's terms change."
+  },
+  {
+   "fieldname": "discount_basis_points",
+   "fieldtype": "Long Int",
+   "label": "Discount (basis points)",
+   "non_negative": 1,
+   "read_only": 1,
+   "description": "The organization's discount at the time of the quote, in basis points (1/100 of a percent). The effective price is re-derived from it, so this and unit_price_micros must agree or the proposal is refused."
+  },
+  {
+   "fieldname": "discount_percent",
+   "fieldtype": "Float",
+   "label": "Discount %",
+   "precision": "2",
+   "read_only": 1,
+   "description": "discount_basis_points / 100, for the desk. Derived; the basis points are the authoritative figure."
+  },
+  {
+   "fieldname": "rate_name",
+   "fieldtype": "Data",
+   "label": "Rate Row",
+   "length": 140,
+   "read_only": 1,
+   "description": "The Rest Credit Rate row the list price was read from \u2014 the record the quote is attributable to. Pricing is derived, never typed, and a rate row can only be edited if no purchase references the price; this names the one that did."
   },
   {
    "fieldname": "section_break_settlement",

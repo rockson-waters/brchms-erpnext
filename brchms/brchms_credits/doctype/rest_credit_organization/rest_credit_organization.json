@@ -20,6 +20,13 @@
   "customer_group",
   "default_group_id",
   "default_group_name",
+  "section_break_terms",
+  "discount_percent",
+  "discount_note",
+  "column_break_terms",
+  "monthly_free_sms_units",
+  "monthly_free_email_units",
+  "free_credits_rollover",
   "section_break_groups",
   "groups"
  ],
@@ -120,6 +127,55 @@
    "label": "Default Funding Group",
    "length": 200,
    "description": "The default group's display name, for the desk."
+  },
+  {
+   "description": "The commercial terms negotiated with this organization. They are read by every quote, proposal and invoice for this church; the platform application cannot set them, and no caller can name its own discount. Kept apart from the billing-identity fields above because an operator edits these while registration DERIVES those.",
+   "fieldname": "section_break_terms",
+   "fieldtype": "Section Break",
+   "label": "Commercial Terms"
+  },
+  {
+   "default": "0",
+   "description": "A negotiated discount on this organization's credit purchases, as a percentage (for example 12.50 for 12.5%). Applied to the rate card's list price; both sides re-derive the effective price from the same basis points, so the app and this site cannot disagree by a rounding step. Must be at least 0 and strictly less than 100 \u2014 a 100% discount would hand out credits for nothing.",
+   "fieldname": "discount_percent",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Discount %",
+   "non_negative": 1,
+   "precision": "2"
+  },
+  {
+   "description": "Why this organization has this discount, for whoever reviews it later. Optional: a percentage with no explanation is still a term, but the explanation is what makes it auditable.",
+   "fieldname": "discount_note",
+   "fieldtype": "Small Text",
+   "label": "Discount Note"
+  },
+  {
+   "fieldname": "column_break_terms",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "Free SMS segments this organization is entitled to each month. ERPNext states the entitlement (it is a billing term); the Rest app turns it into a grant in its own ledger. Zero means no monthly allowance on this channel.",
+   "fieldname": "monthly_free_sms_units",
+   "fieldtype": "Long Int",
+   "label": "Monthly Free SMS Units",
+   "non_negative": 1
+  },
+  {
+   "default": "0",
+   "description": "Free email messages this organization is entitled to each month. Same read-only entitlement handoff as the SMS figure: ERPNext states it, the app grants it.",
+   "fieldname": "monthly_free_email_units",
+   "fieldtype": "Long Int",
+   "label": "Monthly Free Email Units",
+   "non_negative": 1
+  },
+  {
+   "default": "0",
+   "description": "When on, an unused monthly allowance carries forward instead of expiring at the end of its month. The app decides the grant lot's expiry from this flag; ERPNext only states the term.",
+   "fieldname": "free_credits_rollover",
+   "fieldtype": "Check",
+   "label": "Free Credits Rollover"
   },
   {
    "fieldname": "section_break_groups",

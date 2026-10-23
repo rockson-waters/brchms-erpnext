@@ -246,6 +246,26 @@ exact case the composite index exists to allow. The field flag is removed and
 The tests that pin all of this live in `brchms/tests/test_proposals.py` and
 `brchms/tests/test_settlement.py`; the full suite is green on a scratch site.
 
+### The v0.14.0 hardening: the wall is now checked in code, not only in the permission model
+
+Two whitelisted methods were reachable with more power than the boundary above
+claims:
+
+- `settle_proposal` submits a proposal with `ignore_permissions`, and its only
+  documented restriction was that the integration role lacks `submit`. That was
+  true of the role, but the method did not check it: any whitelisted caller could
+  pass an existing payment document and settle. It now begins with
+  `frappe.has_permission("Rest Credit Proposal", "submit")` **before reading a
+  proposal or a payment document**. The automatic settlement hook
+  (`settle_for_payment_entry`) does not go through this method, so the ordinary
+  path is unchanged; `Rest Integration` now gets a `PermissionError`.
+- `rate_fixtures.install/remove` wrote and deleted rate rows with
+  `ignore_permissions` and no guard. Both now require System Manager.
+
+The new `Rest Support Agent` role is separate for the same reason: the long-lived
+integration credential must not be able to rewrite a malfunction report after
+filing it.
+
 ## 7. Verification
 
 `brchms/tests/test_proposals.py` — 23 tests, all passing against the live site.
