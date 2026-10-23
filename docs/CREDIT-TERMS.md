@@ -26,10 +26,11 @@ discount_minor        = list_amount_minor - amount_minor
 
 - The app sends the list price, basis points and effective price to
   `create_proposal`; the proposal refuses a snapshot whose parts disagree.
-- The proposal also refuses a snapshot whose discount differs from the
-  organization's current registry term, with "the price changed while this was
-  being raised; refresh the quote". A quote is priced once and never re-priced by
-  a later rate or term change.
+- The quoted discount is **locked in** on the proposal. It is deliberately not
+  compared with the organization's current registry term at proposal time: a
+  discount changed after the buyer accepted the quote must not re-price or strand
+  that purchase. The registry remains the authority for new quotes
+  (`get_credit_rate` / `quote`); the proposal records what they answered.
 - A discount that rounds the effective price to zero is reported as
   `pricing_error` and refused; free credits are the mechanism for free units, not
   a 100% discount.

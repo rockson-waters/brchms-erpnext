@@ -250,23 +250,16 @@ def create_proposal(
 	if pricing_error:
 		frappe.throw(pricing_error, frappe.ValidationError)
 
-	if list_supplied or discount_supplied:
-		configured_bp = terms.discount_basis_points(
-			payload["organization_id"], payload["instance_id"]
-		)
-		if basis_points != configured_bp:
-			# Refused rather than silently re-priced in either direction: the buyer
-			# was shown one price and the organization's term is another. A purchase
-			# that quietly charged the new discount could over-refund; one that
-			# quietly charged the old price would bill against a term that no longer
-			# exists.
-			frappe.throw(
-				_(
-					"The price of this purchase changed while it was being raised. Refresh the "
-					"quote and try again."
-				),
-				frappe.ValidationError,
-			)
+	# ── The snapshot prevails ───────────────────────────────────────────────
+	#
+	# The discount the buyer was quoted is LOCKED IN here and is what the
+	# invoice and the grant use. It is deliberately NOT compared with the
+	# organization's current registry term: an operator changing a discount
+	# after a quote must not re-price (or strand) a purchase the buyer already
+	# accepted. "Priced once, never re-priced" applies to the discount exactly
+	# as it applies to the rate card. The registry is still the authority for
+	# NEW quotes -- `get_credit_rate` and `quote` read it themselves; this
+	# method records what they answered.
 
 	payload["discount_percent"] = round(basis_points / 100, 2)
 	payload["list_amount_minor"] = invoicing.minor_amount_for(

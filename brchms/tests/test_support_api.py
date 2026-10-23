@@ -97,7 +97,9 @@ class TestMalfunctionReportAPI(FrappeTestCase):
 		self.request_id = "test-request-{0}".format(frappe.generate_hash(length=10))
 
 	def tearDown(self):
-		delete_created(self.watermark)
+		# The tests created rows after `self.watermark`; compute the new high
+		# water mark now so the cleanup deletes exactly this test's rows.
+		delete_created(self.watermark, series_watermark())
 		try:
 			frappe.cache().delete_value(api._rate_key(self.instance_id))
 		except Exception:
@@ -151,7 +153,14 @@ class TestMalfunctionReportAPI(FrappeTestCase):
 		)
 		self.assertIsNotNone(file_row, "the screenshot was not saved as an attached file")
 		self.assertEqual(file_row.is_private, 1)
-		self.assertEqual(file_row.file_name, "Person-form.png")
+		# Frappe appends a short suffix when a private file of the same name
+		# already exists (a previous run, a shared screenshot). The stored name is
+		# therefore the sanitized stem plus that suffix; the requirement is the
+		# stem and the image type, not the exact suffix.
+		self.assertTrue(
+			file_row.file_name.startswith("Person-form"),
+			"expected the sanitized screenshot stem, got {0}".format(file_row.file_name),
+		)
 		self.assertTrue(file_row.file_url.endswith(".png"))
 		self.assertEqual(row.screenshot, file_row.file_url)
 
@@ -185,12 +194,9 @@ class TestMalfunctionReportAPI(FrappeTestCase):
 		second = api.create_malfunction_report(
 			**self.payload(instance_id="{0}-other".format(self.instance_id))
 		)
-		try:
-			self.assertNotEqual(first["name"], second["name"])
-		finally:
-			# The second row belongs to a different instance; remove it here
-			# because the watermark cleanup runs in tearDown for the whole set.
-			delete_created(self.watermark)
+		# Both rows are inside this test's naming-series window, so the tearDown
+		# cleanup removes both; no per-test cleanup is needed here.
+		self.assertNotEqual(first["name"], second["name"])
 
 	# ── Validation ───────────────────────────────────────────────────────────
 

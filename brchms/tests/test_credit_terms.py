@@ -10,9 +10,9 @@ allowances, and the settlement security gate.
   * the discount arithmetic is INTEGER half-up on both sides, so the quote, the
     proposal, the invoice and the platform application cannot disagree by a
     rounding step;
-  * the effective price is re-derived from `(list, basis_points)` and a caller
-    that names a discount the organization does not have is REFUSED -- the
-    registry is the authority, not the request body;
+  * the effective price is re-derived from `(list, basis_points)`; the quoted
+    discount is LOCKED IN on the proposal and prevails even if the registry term
+    changes afterwards (priced once, never re-priced);
   * the minimum is enforced on the NET amount (what the buyer pays after the
     discount), at quote, create_proposal, the public intake and checkout, and
     the conversion to minor units is exact for a currency whose fraction is not
@@ -377,22 +377,35 @@ class TestQuoteAndInvoice(TermsTestCase):
 		self.assertFalse(flt(invoice.get("discount_amount") or 0))
 		self.assertEqual(flt(invoice.grand_total), 4.05)
 
-	def test_a_forged_or_stale_discount_is_refused(self):
+	def test_the_quoted_discount_is_locked_in_when_the_term_changes(self):
 		"""
-		The registry is the authority: a caller claiming a discount the
-		organization does not have is refused, and so is a quote from before an
-		operator changed the term.
+		The snapshot prevails: a purchase quoted at 5% must still be billed at
+		5% after the organization's registry term moves to 10%.
+
+		"Priced once, never re-priced" applies to the discount as much as to the
+		rate card. Re-pricing here would either over-refund or strand a request
+		the buyer already accepted.
 		"""
-		with self.assertRaises(frappe.ValidationError) as caught:
-			proposals.create_proposal(
-				**self._proposal_payload(
-					amount_minor=428,  # 5% off, not the organization's 10%
-					unit_price_micros=42750,
-					list_unit_price_micros=45000,
-					discount_basis_points=500,
-				)
+		result = proposals.create_proposal(
+			**self._proposal_payload(
+				request_key="test-terms-locked-discount",
+				purchase_reference="TERMS-TEST-LOCKED",
+				amount_minor=428,  # 5% off, not the organization's current 10%
+				unit_price_micros=42750,
+				list_unit_price_micros=45000,
+				discount_basis_points=500,
 			)
-		self.assertIn("changed", str(caught.exception).lower())
+		)
+
+		self.assertEqual(result["discount_basis_points"], 500)
+		self.assertEqual(result["discount_percent"], 5.0)
+		self.assertEqual(result["amount_minor"], 428)
+		self.assertEqual(result["list_amount_minor"], 450)
+		self.assertEqual(result["discount_minor"], 22)
+
+		doc = frappe.get_doc("Rest Credit Proposal", result["proposal"])
+		self.assertEqual(doc.discount_basis_points, 500)
+		self.assertEqual(doc.amount_minor, 428)
 
 	def test_an_inconsistent_snapshot_is_refused(self):
 		with self.assertRaises(frappe.ValidationError) as caught:
@@ -713,9 +726,13 @@ class TestPublicCheckoutTerms(TermsTestCase):
 		self.assertEqual(flt(invoice.items[0].rate), 22.50)
 
 	def test_checkout_refuses_below_the_minimum_before_anything_is_raised(self):
-		set_minimum(30)  # 30.00 floor; this order is 22.50
+		# Create the intake row first, then raise the floor. The intake validate is
+		# covered by its own test; this one proves the CHECKOUT gate (which knows
+		# the organization's discounted price) refuses a row that was valid when
+		# it was recorded.
 		purchase = self._request()
 		frappe.db.commit()
+		set_minimum(30)  # 30.00 floor; this order is 22.50
 
 		with self.assertRaises(frappe.ValidationError) as caught:
 			purchase_module.checkout(purchase=purchase.name, org=self.church.link_slug)

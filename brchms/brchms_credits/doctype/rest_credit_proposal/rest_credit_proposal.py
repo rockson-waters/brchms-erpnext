@@ -208,17 +208,14 @@ class RestCreditProposal(Document):
 
 		list_amount = invoicing.minor_amount_for(units, list_micros, self.currency)
 		amount = cint(self.amount_minor or 0)
-		if amount > list_amount:
-			frappe.throw(
-				_(
-					"The discounted amount on this proposal ({0}) is greater than its list amount "
-					"({1}). A discount cannot increase what the buyer pays."
-				).format(amount, list_amount),
-				frappe.ValidationError,
-			)
-
+		# A SETTLER may correct the amount after the quote: money that arrived for
+		# more than the quoted amount is a fact (`quote_variance_minor` records the
+		# difference), not a discount that increased. `create_proposal` still refuses
+		# an over-list amount at creation; this validator only refuses a discount
+		# SNAPSHOT that cannot be derived from its own price. Clamp the discount so
+		# the field stays non-negative; the variance is the record of the excess.
 		self.list_amount_minor = list_amount
-		self.discount_minor = list_amount - amount
+		self.discount_minor = max(0, list_amount - amount)
 
 	def _refuse_edits_after_submission(self):
 		"""
